@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Suca Media</string>
+
+    <!-- Server setup -->
+    <string name="setup_title">Configurar servidor SMB</string>
+    <string name="setup_ip_hint">Endereço IP do servidor (ex: 192.168.1.50)</string>
+    <string name="setup_testing_ip">Testando conexão…</string>
+    <string name="setup_ip_ok">Servidor encontrado!</string>
+    <string name="setup_ip_fail">Servidor não encontrado. Verifique o IP e a rede.</string>
+    <string name="setup_user_hint">Usuário</string>
+    <string name="setup_pass_hint">Senha</string>
+    <string name="setup_testing_login">Verificando usuário e senha…</string>
+    <string name="setup_login_ok">Login autorizado!</string>
+    <string name="setup_login_fail">Usuário ou senha inválidos.</string>
+    <string name="setup_choose_share">Escolha a pasta compartilhada</string>
+    <string name="setup_no_shares">Nenhuma pasta compartilhada encontrada.</string>
+    <string name="setup_retry">Tentar novamente</string>
+    <string name="setup_continue">Continuar</string>
+    <string name="setup_test_connection">Testar conexão</string>
+    <string name="setup_ip_invalid">Digite um endereço IP.</string>
+    <string name="setup_user_pass_desc">Digite o usuário e a senha do compartilhamento</string>
+    <string name="setup_loading_shares">Carregando pastas compartilhadas…</string>
+    <string name="setup_manual_share_hint">Nome da pasta compartilhada (ex: backup-500gb)</string>
+    <string name="setup_testing_connection">Testando pasta…</string>
+    <string name="setup_share_not_found">Pasta não encontrada ou sem acesso. Confira o nome.</string>
+
+    <!-- Browse -->
+    <string name="row_movies">Filmes</string>
+    <string name="row_series">Séries</string>
+    <string name="row_documentaries">Documentários</string>
+    <string name="row_musicals">Musicais</string>
+    <string name="row_personal">Pessoais</string>
+    <string name="row_other">Outros</string>
+    <string name="row_settings">Configurações</string>
+    <string name="row_continue_watching">Continuar assistindo</string>
+    <string name="scanning_library">Procurando na biblioteca…</string>
+
+    <!-- Detail -->
+    <string name="action_play">Assistir</string>
+    <string name="action_subtitles">Legendas</string>
+    <string name="action_change_server">Trocar servidor</string>
+    <string name="action_view_episodes">Ver episódios</string>
+
+    <!-- Subtitles -->
+    <string name="subtitle_search_title">Buscar legendas</string>
+    <string name="subtitle_source_local">Neste diretório</string>
+    <string name="subtitle_source_subtitlecat">subtitlecat.com</string>
+    <string name="subtitle_source_addic7ed">addic7ed.com</string>
+    <string name="subtitle_source_opensubtitles">OpenSubtitles</string>
+    <string name="subtitle_source_suca_media">OpenSubtitles via Suca Media</string>
+    <string name="subtitle_none_found">Nenhuma legenda encontrada.</string>
+    <string name="subtitle_searching">Buscando legendas…</string>
+    <string name="subtitle_download_needs_key">Configure sua chave OpenSubtitles em Ajustes para baixar esta legenda.</string>
+
+    <!-- Player: faixas de áudio/legenda -->
+    <string name="track_picker_subtitles_title">Legendas</string>
+    <string name="track_picker_audio_title">Áudio</string>
+    <string name="track_option_subtitles_off">Desativadas</string>
+    <string name="track_option_search_online">Buscar legendas online…</string>
+    <string name="track_option_no_audio_tracks">Nenhuma faixa de áudio alternativa</string>
+    <string name="action_audio_track">Áudio</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Configurações</string>
+    <string name="settings_opensubtitles_key">Chave de API do OpenSubtitles</string>
+    <string name="settings_opensubtitles_test">Testar chave</string>
+    <string name="settings_server">Servidor SMB</string>
+    <string name="settings_key_invalid">Digite uma chave de API.</string>
+    <string name="settings_key_ok">Chave válida!</string>
+    <string name="settings_key_fail">Chave inválida ou sem acesso.</string>
+    <string name="settings_suca_pairing">Parear com Suca Media</string>
+    <string name="settings_suca_connected">Suca Media: conectado (%1$s)</string>
+    <string name="settings_suca_not_connected">Suca Media: não conectado</string>
+
+    <!-- Pairing -->
+    <string name="pairing_title">Parear com Suca Media</string>
+    <string name="pairing_instructions">Abra sucamedia.lovable.app/connect, entre na sua conta e gere um código. Digite o código abaixo.</string>
+    <string name="pairing_status_connected">Conectado como %1$s</string>
+    <string name="pairing_code_hint">Código de pareamento</string>
+    <string name="pairing_action_pair">Parear</string>
+    <string name="pairing_action_unpair">Desparear este dispositivo</string>
+    <string name="pairing_code_missing">Digite o código exibido em sucamedia.lovable.app/connect.</string>
+    <string name="pairing_success">Conectado à sua conta Suca Media!</string>
+    <string name="pairing_unpaired">Dispositivo desconectado.</string>
+
+    <!-- Cloud library (Suca Media) -->
+    <string name="row_my_list">Minha lista (Suca Media)</string>
+    <string name="cloud_item_not_found_locally">Este título não foi encontrado no seu servidor SMB.</string>
+</resources>

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Suca Media brand tokens (ported from docs/SKIN.md + src/styles.css of the
+         paired web app). Keep these in sync if the web palette changes. -->
+    <color name="rena_background">#160F1E</color>
+    <color name="rena_surface">#241B2E</color>
+    <color name="rena_surface_muted">#2B2136</color>
+    <color name="rena_border">#453A52</color>
+    <color name="rena_accent">#FF7A2F</color>
+    <color name="rena_primary">#FF3D7F</color>
+    <color name="rena_text_primary">#FFFFFF</color>
+    <color name="rena_text_secondary">#C9BEC7</color>
+    <color name="rena_text_tertiary">#8F859A</color>
+    <color name="rena_error">#FF5A5F</color>
+    <color name="rena_success">#22E3B5</color>
+
+    <!-- Full brand palette -->
+    <color name="suca_magenta">#FF3D7F</color>
+    <color name="suca_coral">#FF7A2F</color>
+    <color name="suca_amber">#FFD23F</color>
+    <color name="suca_mint">#22E3B5</color>
+    <color name="suca_cyan">#4CC9FF</color>
+    <color name="suca_violet">#9B5CFF</color>
+    <color name="suca_logo_cream">#FFF4E8</color>
+    <color name="suca_logo_peach">#FFD9C2</color>
+</resources>

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.RenaPlay" parent="Theme.Leanback">
+        <item name="android:windowBackground">@color/rena_background</item>
+        <item name="android:colorBackground">@color/rena_background</item>
+        <item name="colorPrimary">@color/rena_accent</item>
+        <item name="colorAccent">@color/rena_accent</item>
+    </style>
+
+    <style name="Theme.RenaPlay.Browse" parent="Theme.Leanback.Browse">
+        <item name="android:windowBackground">@color/rena_background</item>
+        <item name="browseTitleTextStyle">@style/RenaPlay.BrowseTitle</item>
+        <item name="headersVerticalGridStyle">@style/RenaPlay.HeadersVerticalGrid</item>
+    </style>
+
+    <style name="RenaPlay.BrowseTitle" parent="Widget.Leanback.Title.Text">
+        <item name="android:textColor">@color/rena_text_primary</item>
+    </style>
+
+    <style name="RenaPlay.HeadersVerticalGrid" parent="Widget.Leanback.Headers.VerticalGridView" />
+
+    <style name="Theme.RenaPlay.Details" parent="Theme.Leanback.Details">
+        <item name="android:windowBackground">@color/rena_background</item>
+    </style>
+
+    <style name="Theme.RenaPlay.GuidedStep" parent="Theme.Leanback.GuidedStep">
+        <item name="guidedStepBackground">@color/rena_background</item>
+    </style>
+</resources>

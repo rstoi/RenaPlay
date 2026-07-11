@@ -1,0 +1,429 @@
+package com.baita.renaplay.player
+
+import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.View
+import android.widget.FrameLayout
+import android.widget.TextView
+import androidx.activity.addCallback
+import androidx.leanback.app.VideoSupportFragment
+import androidx.leanback.app.VideoSupportFragmentGlueHost
+import androidx.lifecycle.lifecycleScope
+import androidx.media3.common.C
+import androidx.media3.common.Format
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
+import androidx.media3.common.text.CueGroup
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.ui.SubtitleView
+import androidx.media3.ui.leanback.LeanbackPlayerAdapter
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.baita.renaplay.R
+import com.baita.renaplay.data.ServerConfig
+import com.baita.renaplay.data.ServerConfigStore
+import com.baita.renaplay.data.SucaAuthStore
+import com.baita.renaplay.data.WatchProgressStore
+import com.baita.renaplay.smb.SmbClientProvider
+import com.baita.renaplay.smb.SmbResult
+import com.baita.renaplay.suca.SucaApiClient
+import com.baita.renaplay.subtitles.SubtitleSearchActivity
+import com.baita.renaplay.subtitles.subtitleMatchScore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.util.Locale
+
+private val SUBTITLE_EXTENSIONS = setOf("srt", "vtt", "ass", "ssa", "sub")
+
+private enum class TrackPickerType { SUBTITLE, AUDIO }
+
+class PlaybackVideoFragment : VideoSupportFragment() {
+
+    private var player: ExoPlayer? = null
+    private var overlay: FrameLayout? = null
+    private var openPicker: TrackPickerType? = null
+    private var videoTitle: String = ""
+    private var videoPath: String = ""
+    private var tmdbId: Int? = null
+    private var mediaType: String? = null
+    private var progressHandler: Handler? = null
+    private var hasAppliedResume = false
+    private var hasSentPlayEvent = false
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        val config = ServerConfigStore.load(requireContext()) ?: run {
+            requireActivity().finish()
+            return
+        }
+
+        val intent = requireActivity().intent
+        videoTitle = intent.getStringExtra(PlaybackActivity.EXTRA_TITLE) ?: ""
+        videoPath = intent.getStringExtra(PlaybackActivity.EXTRA_PATH) ?: ""
+        tmdbId = intent.getIntExtra(PlaybackActivity.EXTRA_TMDB_ID, -1).takeIf { it != -1 }
+        mediaType = intent.getStringExtra(PlaybackActivity.EXTRA_MEDIA_TYPE)
+        val subtitleLocalPath = intent.getStringExtra(PlaybackActivity.EXTRA_SUBTITLE_LOCAL_PATH)
+        val subtitleSmbPath = intent.getStringExtra(PlaybackActivity.EXTRA_SUBTITLE_SMB_PATH)
+
+        overlay = requireActivity().findViewById(R.id.track_picker_overlay)
+        val subtitleView = requireActivity().findViewById<SubtitleView>(R.id.subtitle_view)
+
+        requireActivity().onBackPressedDispatcher.addCallback(this) {
+            if (openPicker != null) {
+                hideTrackPicker()
+            } else {
+                isEnabled = false
+                requireActivity().onBackPressedDispatcher.onBackPressed()
+            }
+        }
+
+        val exoPlayer = ExoPlayer.Builder(requireContext())
+            .setMediaSourceFactory(
+                DefaultMediaSourceFactory(requireContext())
+                    .setDataSourceFactory(CompositeDataSourceFactory(requireContext(), config))
+            )
+            // Buffers maiores que o padrão do ExoPlayer: streaming via SMB tem latência mais
+            // variável que HTTP/CDN (autenticação por arquivo, throughput de Wi-Fi variável),
+            // então um buffer maior absorve esses picos sem re-bufferizar no meio do vídeo.
+            .setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(
+                        30_000, // mín. antes de arriscar rebuffer
+                        120_000, // máx. mantido em buffer
+                        1_500, // mín. pra iniciar playback
+                        3_000 // mín. pra retomar após rebuffer
+                    )
+                    .build()
+            )
+            .build()
+        player = exoPlayer
+
+        // VideoSupportFragment não tem um SubtitleView embutido: sem isso, o ExoPlayer
+        // seleciona a faixa de texto normalmente, mas nenhum texto aparece na tela.
+        exoPlayer.addListener(object : Player.Listener {
+            override fun onCues(cueGroup: CueGroup) {
+                subtitleView.setCues(cueGroup.cues)
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_READY && !hasAppliedResume) {
+                    hasAppliedResume = true
+                    val resumeMs = WatchProgressStore.lastPosition(requireContext(), videoPath)
+                    if (resumeMs > 5_000L && resumeMs < exoPlayer.duration - 5_000L) {
+                        exoPlayer.seekTo(resumeMs)
+                    }
+                }
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying) {
+                    val eventType = if (!hasSentPlayEvent) "play" else "resume"
+                    hasSentPlayEvent = true
+                    sendActivityEvent(eventType, exoPlayer)
+                } else if (hasSentPlayEvent) {
+                    sendActivityEvent("pause", exoPlayer)
+                }
+            }
+        })
+
+        progressHandler = Handler(Looper.getMainLooper())
+        progressHandler?.post(object : Runnable {
+            override fun run() {
+                exoPlayer.let {
+                    if (it.duration > 0) {
+                        WatchProgressStore.save(
+                            requireContext(), videoPath, videoTitle, it.currentPosition, it.duration, tmdbId, mediaType
+                        )
+                    }
+                }
+                progressHandler?.postDelayed(this, 5_000)
+            }
+        })
+
+        val playerAdapter = LeanbackPlayerAdapter(requireContext(), exoPlayer, 1000)
+        val glue = RenaPlaybackGlue(
+            requireContext(),
+            playerAdapter,
+            onSubtitlesClicked = { showTrackPicker(TrackPickerType.SUBTITLE) },
+            onAudioClicked = { showTrackPicker(TrackPickerType.AUDIO) }
+        )
+        glue.title = videoTitle
+        glue.host = VideoSupportFragmentGlueHost(this)
+        glue.playWhenPrepared()
+
+        // Preferência por português tanto pra faixas de áudio quanto de legenda embutidas no
+        // próprio arquivo (ex: MKV com trilhas em vários idiomas) — sem isso o player usa
+        // qualquer faixa marcada "default" no arquivo, que pode estar em outro idioma (já visto
+        // um MKV com faixa de legenda francesa marcada como padrão). Legendas externas resolvidas
+        // por [buildSubtitleConfigFromBytes] são sempre marcadas "pt" também, então essa preferência
+        // já serve pros dois casos sem precisar esperar a resolução da legenda externa.
+        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+            .setPreferredTextLanguage("pt")
+            .setPreferredAudioLanguage("pt")
+            .setSelectUndeterminedTextLanguage(true)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+            .build()
+
+        // Começa a carregar o vídeo já — não espera a resolução de legenda (que pode envolver uma
+        // listagem SMB e o download de um arquivo inteiro) pra não atrasar o primeiro frame.
+        exoPlayer.setMediaItem(MediaItem.Builder().setUri(smbPathToUri(videoPath)).build())
+        exoPlayer.prepare()
+
+        lifecycleScope.launch {
+            val subtitleConfig = resolveSubtitleConfig(config, videoPath, subtitleLocalPath, subtitleSmbPath)
+                ?: return@launch
+            // Legenda externa encontrada depois que o vídeo já começou: reaplica a mídia com ela,
+            // preservando a posição atual — um pequeno soluço aceitável só quando existe legenda
+            // externa, em vez de sempre atrasar o início do vídeo esperando por ela.
+            exoPlayer.setMediaItem(
+                MediaItem.Builder()
+                    .setUri(smbPathToUri(videoPath))
+                    .setSubtitleConfigurations(listOf(subtitleConfig))
+                    .build(),
+                exoPlayer.currentPosition
+            )
+            exoPlayer.prepare()
+        }
+    }
+
+    private suspend fun resolveSubtitleConfig(
+        config: ServerConfig,
+        videoPath: String,
+        subtitleLocalPath: String?,
+        subtitleSmbPath: String?
+    ): MediaItem.SubtitleConfiguration? {
+        if (subtitleLocalPath != null) {
+            val bytes = withContext(Dispatchers.IO) { runCatching { File(subtitleLocalPath).readBytes() }.getOrNull() }
+                ?: return null
+            return buildSubtitleConfigFromBytes(bytes, subtitleLocalPath)
+        }
+        if (subtitleSmbPath != null) {
+            val bytes = withContext(Dispatchers.IO) { readSmbBytes(config, subtitleSmbPath) } ?: return null
+            return buildSubtitleConfigFromBytes(bytes, subtitleSmbPath)
+        }
+
+        // Auto-detecta legenda na mesma pasta do vídeo. Nomes de arquivo raramente batem
+        // exatamente (ex: vídeo "Pressure.2026.2026.1080p.WEBRip...NeoNoir.mkv" vs legenda
+        // "Pressure.2026.srt") — por isso usa casamento por palavras em comum em vez de exigir
+        // nome-base idêntico; sem isso, nenhuma legenda externa é encontrada e o player cai de
+        // volta pra faixa de texto embutida "default" do arquivo, que pode estar em outro idioma.
+        return withContext(Dispatchers.IO) {
+            val dir = videoPath.substringBeforeLast('/', "")
+            val videoName = videoPath.substringAfterLast('/')
+            val result = SmbClientProvider.instance.listFiles(config.ip, config.share, dir, config.user, config.password, config.domain)
+            if (result is SmbResult.Success) {
+                val match = result.value
+                    .filter {
+                        !it.isDirectory && SUBTITLE_EXTENSIONS.contains(it.name.substringAfterLast('.', "").lowercase())
+                    }
+                    .maxByOrNull { subtitleMatchScore(videoName, it.name) }
+                    ?.takeIf { subtitleMatchScore(videoName, it.name) > 0 }
+                match?.let { entry ->
+                    readSmbBytes(config, entry.path)?.let { bytes -> buildSubtitleConfigFromBytes(bytes, entry.path) }
+                }
+            } else {
+                null
+            }
+        }
+    }
+
+    private fun readSmbBytes(config: ServerConfig, path: String): ByteArray? = runCatching {
+        SmbClientProvider.instance.openInputStream(config.ip, config.share, path, config.user, config.password, config.domain)
+            .use { it.readBytes() }
+    }.getOrNull()
+
+    /**
+     * Os decodificadores de legenda do Media3 assumem UTF-8 sem detecção de charset — legendas
+     * em Windows-1252/Latin-1 (comuns em rips mais antigos) viram texto com "�" no lugar de
+     * acentos. Por isso lemos os bytes brutos aqui, normalizamos para UTF-8 de verdade
+     * ([SubtitleEncodingFixer]) e gravamos num arquivo temporário local, em vez de apontar o
+     * player direto para a fonte original (local ou SMB).
+     */
+    private fun buildSubtitleConfigFromBytes(rawBytes: ByteArray, path: String): MediaItem.SubtitleConfiguration {
+        val extension = path.substringAfterLast('.', "srt")
+        val utf8Bytes = SubtitleEncodingFixer.normalizeToUtf8(rawBytes)
+        val tempFile = File.createTempFile("subtitle_", ".$extension", requireContext().cacheDir)
+        tempFile.writeBytes(utf8Bytes)
+        tempFile.deleteOnExit()
+
+        val mimeType = when (extension.lowercase()) {
+            "vtt" -> MimeTypes.TEXT_VTT
+            "ass", "ssa" -> MimeTypes.TEXT_SSA
+            else -> MimeTypes.APPLICATION_SUBRIP
+        }
+        return MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(tempFile))
+            .setMimeType(mimeType)
+            .setLanguage("pt")
+            // Sem essa flag, uma legenda externa carrega mas nunca fica ativa por padrão no player.
+            .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+            .build()
+    }
+
+    private fun showTrackPicker(type: TrackPickerType) {
+        val overlayView = overlay ?: return
+        val exoPlayer = player ?: return
+
+        overlayView.removeAllViews()
+        val panel = layoutInflater.inflate(R.layout.view_track_picker, overlayView, false)
+        val titleView = panel.findViewById<TextView>(R.id.track_picker_title)
+        val listView = panel.findViewById<RecyclerView>(R.id.track_picker_list)
+        listView.layoutManager = LinearLayoutManager(requireContext())
+
+        val options = when (type) {
+            TrackPickerType.SUBTITLE -> buildSubtitleOptions(exoPlayer)
+            TrackPickerType.AUDIO -> buildAudioOptions(exoPlayer)
+        }
+        titleView.text = getString(
+            if (type == TrackPickerType.SUBTITLE) R.string.track_picker_subtitles_title else R.string.track_picker_audio_title
+        )
+
+        val adapter = TrackOptionAdapter(options) { option ->
+            option.action()
+            hideTrackPicker()
+        }
+        listView.adapter = adapter
+
+        overlayView.addView(panel)
+        overlayView.visibility = View.VISIBLE
+        openPicker = type
+
+        listView.post {
+            val holder = listView.findViewHolderForAdapterPosition(adapter.firstSelectedIndex())
+            holder?.itemView?.requestFocus()
+        }
+    }
+
+    private fun hideTrackPicker() {
+        overlay?.visibility = View.GONE
+        overlay?.removeAllViews()
+        openPicker = null
+    }
+
+    private fun buildSubtitleOptions(exoPlayer: ExoPlayer): List<TrackOption> {
+        val textGroups = exoPlayer.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+        val anySelected = textGroups.any { it.isSelected }
+
+        val options = mutableListOf<TrackOption>()
+        options += TrackOption(getString(R.string.track_option_subtitles_off), !anySelected) {
+            exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                .build()
+        }
+        options += buildTrackOptions(exoPlayer, textGroups, C.TRACK_TYPE_TEXT, "Legenda")
+        options += TrackOption(getString(R.string.track_option_search_online), selected = false) {
+            openSubtitleSearch()
+        }
+        return options
+    }
+
+    private fun buildAudioOptions(exoPlayer: ExoPlayer): List<TrackOption> {
+        val audioGroups = exoPlayer.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+        val options = buildTrackOptions(exoPlayer, audioGroups, C.TRACK_TYPE_AUDIO, "Áudio")
+        return options.ifEmpty {
+            listOf(TrackOption(getString(R.string.track_option_no_audio_tracks), selected = true) {})
+        }
+    }
+
+    private fun buildTrackOptions(
+        exoPlayer: ExoPlayer,
+        groups: List<Tracks.Group>,
+        trackType: Int,
+        fallbackPrefix: String
+    ): List<TrackOption> {
+        val options = mutableListOf<TrackOption>()
+        groups.forEach { group ->
+            for (i in 0 until group.length) {
+                if (!group.isTrackSupported(i)) continue
+                val format = group.getTrackFormat(i)
+                val label = trackLabel(format, fallbackPrefix, options.size + 1)
+                val selected = group.isTrackSelected(i)
+                options += TrackOption(label, selected) {
+                    exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(trackType, false)
+                        .clearOverridesOfType(trackType)
+                        .addOverride(TrackSelectionOverride(group.mediaTrackGroup, i))
+                        .build()
+                }
+            }
+        }
+        return options
+    }
+
+    private fun trackLabel(format: Format, fallbackPrefix: String, index: Int): String {
+        val label = format.label
+        val lang = format.language
+        return when {
+            !label.isNullOrBlank() -> label
+            !lang.isNullOrBlank() -> runCatching { Locale(lang).displayLanguage.replaceFirstChar { it.uppercase() } }
+                .getOrDefault(lang)
+            else -> "$fallbackPrefix $index"
+        }
+    }
+
+    private fun openSubtitleSearch() {
+        val intent = Intent(requireContext(), SubtitleSearchActivity::class.java).apply {
+            putExtra(SubtitleSearchActivity.EXTRA_TITLE, videoTitle)
+            putExtra(SubtitleSearchActivity.EXTRA_PATH, videoPath)
+            tmdbId?.let {
+                putExtra(SubtitleSearchActivity.EXTRA_TMDB_ID, it)
+                putExtra(SubtitleSearchActivity.EXTRA_MEDIA_TYPE, mediaType)
+            }
+        }
+        startActivity(intent)
+        requireActivity().finish()
+    }
+
+    /** Best-effort playback telemetry to Suca Media, only when paired. Never blocks the UI. */
+    private fun sendActivityEvent(eventType: String, exoPlayer: ExoPlayer) {
+        val context = requireContext().applicationContext
+        val session = SucaAuthStore.load(context) ?: return
+        val positionSeconds = (exoPlayer.currentPosition / 1000).toInt()
+        val durationSeconds = (exoPlayer.duration.takeIf { it > 0 } ?: 0L).let { (it / 1000).toInt() }
+        val title = videoTitle
+        val eventTmdbId = tmdbId
+        val eventMediaType = mediaType
+        Thread {
+            runCatching {
+                SucaApiClient(context).logActivity(
+                    session = session,
+                    eventType = eventType,
+                    tmdbId = eventTmdbId,
+                    mediaType = eventMediaType,
+                    title = title,
+                    positionSeconds = positionSeconds,
+                    durationSeconds = durationSeconds
+                )
+            }
+        }.start()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        progressHandler?.removeCallbacksAndMessages(null)
+        progressHandler = null
+        player?.let {
+            if (it.duration > 0) {
+                WatchProgressStore.save(
+                    requireContext(), videoPath, videoTitle, it.currentPosition, it.duration, tmdbId, mediaType
+                )
+                if (hasSentPlayEvent) {
+                    val fraction = it.currentPosition.toFloat() / it.duration.toFloat()
+                    sendActivityEvent(if (fraction >= 0.95f) "complete" else "stop", it)
+                }
+            }
+        }
+        player?.release()
+        player = null
+    }
+}
