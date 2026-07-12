@@ -46,6 +46,8 @@ import java.util.Locale
 
 private val SUBTITLE_EXTENSIONS = setOf("srt", "vtt", "ass", "ssa", "sub")
 
+private const val KODI_PACKAGE = "org.xbmc.kodi"
+
 private enum class TrackPickerType { SUBTITLE, AUDIO }
 
 class PlaybackVideoFragment : VideoSupportFragment() {
@@ -386,8 +388,13 @@ class PlaybackVideoFragment : VideoSupportFragment() {
      * VP8 e VP9, embora o /vendor/etc declare decoders HEVC (a Amazon os reserva aos apps dela).
      * Sem decodificador, o ExoPlayer classifica a faixa de vídeo como UNSUPPORTED_SUBTYPE e
      * simplesmente não a seleciona: o áudio toca e a tela fica PRETA, sem erro nenhum — o pior
-     * tipo de falha, silenciosa. Aqui detectamos isso e dizemos ao usuário o que está havendo.
-     * (O VLC consegue exibir esses arquivos porque traz o próprio decodificador de software.)
+     * tipo de falha, silenciosa.
+     *
+     * Quando isso acontece, passamos a bola pro Kodi (se instalado): ele traz o próprio
+     * decodificador de software (ffmpeg, "ff-hevc (SW)") e exibe o vídeo — medido saturando os 4
+     * núcleos (~370% de 400%), então engasga um pouco, mas exibe. Embutir um decodificador de
+     * software aqui daria exatamente o mesmo resultado (o gargalo é a CPU, não o software) por
+     * +30MB de APK — por isso delegamos em vez de duplicar.
      */
     private fun warnIfVideoUndecodable(tracks: Tracks) {
         if (hasWarnedUndecodableVideo) return
@@ -403,11 +410,43 @@ class PlaybackVideoFragment : VideoSupportFragment() {
             ?.substringAfterLast('/')?.uppercase()
             ?.let { if (it == "HEVC") "H.265 (HEVC)" else it }
             ?: "desconhecido"
+
+        if (handOffToKodi(codec)) return
+
         Toast.makeText(
             requireContext(),
             getString(R.string.playback_video_codec_unsupported, codec),
             Toast.LENGTH_LONG
         ).show()
+    }
+
+    /**
+     * O Kodi registra um intent-filter de ACTION_VIEW para o esquema `smb://` — dá pra mandar o
+     * arquivo direto pro player dele, com as credenciais embutidas na URL (é como o próprio Kodi
+     * guarda fontes de rede). Retorna false se o Kodi não estiver instalado.
+     */
+    private fun handOffToKodi(codec: String): Boolean {
+        val context = requireContext()
+        val config = ServerConfigStore.load(context) ?: return false
+        val encodedPath = Uri.encode(videoPath.trimStart('/'), "/")
+        val smbUrl = "smb://${config.user}:${config.password}@${config.ip}/${config.share}/$encodedPath"
+
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(Uri.parse(smbUrl), "video/*")
+            setPackage(KODI_PACKAGE)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        if (intent.resolveActivity(context.packageManager) == null) return false
+
+        Toast.makeText(
+            context,
+            getString(R.string.playback_handoff_to_kodi, codec),
+            Toast.LENGTH_LONG
+        ).show()
+        startActivity(intent)
+        // Encerra o nosso player: ele só teria áudio sobre tela preta.
+        requireActivity().finish()
+        return true
     }
 
     private fun openSubtitleSearch() {
