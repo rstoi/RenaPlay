@@ -7,6 +7,7 @@ import jcifs.context.BaseContext
 import jcifs.smb.NtlmPasswordAuthenticator
 import jcifs.smb.SmbFile
 import java.io.InputStream
+import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.Properties
@@ -144,5 +145,43 @@ class SmbClient {
         val ctx = contextWithAuth(user, password, domain)
         val url = "smb://$ip/$share/${path.trimStart('/')}"
         return SmbFile(url, ctx).length()
+    }
+
+    private fun smbFile(ip: String, share: String, path: String,
+                        user: String, password: String, domain: String): SmbFile {
+        val ctx = contextWithAuth(user, password, domain)
+        return SmbFile("smb://$ip/$share/${path.trimStart('/')}", ctx)
+    }
+
+    fun openOutputStream(
+        ip: String, share: String, path: String,
+        user: String, password: String, domain: String = ""
+    ): OutputStream = smbFile(ip, share, path, user, password, domain).outputStream
+
+    fun exists(
+        ip: String, share: String, path: String,
+        user: String, password: String, domain: String = ""
+    ): Boolean = runCatching {
+        smbFile(ip, share, path, user, password, domain).exists()
+    }.getOrDefault(false)
+
+    /** Renomeia/move dentro do mesmo share (usado no swap: original→.hevcbak, .tmp→.mp4). */
+    fun renameTo(
+        ip: String, share: String, fromPath: String, toPath: String,
+        user: String, password: String, domain: String = ""
+    ): SmbResult<Unit> = try {
+        val from = smbFile(ip, share, fromPath, user, password, domain)
+        val to = smbFile(ip, share, toPath, user, password, domain)
+        from.renameTo(to)
+        SmbResult.Success(Unit)
+    } catch (e: Exception) {
+        SmbResult.Failure("Falha ao renomear $fromPath → $toPath", e)
+    }
+
+    fun delete(
+        ip: String, share: String, path: String,
+        user: String, password: String, domain: String = ""
+    ) {
+        runCatching { smbFile(ip, share, path, user, password, domain).delete() }
     }
 }

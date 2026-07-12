@@ -29,6 +29,7 @@ import androidx.media3.ui.leanback.LeanbackPlayerAdapter
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.baita.renaplay.R
+import com.baita.renaplay.data.ConversionSettingsStore
 import com.baita.renaplay.data.ServerConfig
 import com.baita.renaplay.data.ServerConfigStore
 import com.baita.renaplay.data.SucaAuthStore
@@ -45,8 +46,6 @@ import java.io.File
 import java.util.Locale
 
 private val SUBTITLE_EXTENSIONS = setOf("srt", "vtt", "ass", "ssa", "sub")
-
-private const val KODI_PACKAGE = "org.xbmc.kodi"
 
 private enum class TrackPickerType { SUBTITLE, AUDIO }
 
@@ -390,11 +389,10 @@ class PlaybackVideoFragment : VideoSupportFragment() {
      * simplesmente não a seleciona: o áudio toca e a tela fica PRETA, sem erro nenhum — o pior
      * tipo de falha, silenciosa.
      *
-     * Quando isso acontece, passamos a bola pro Kodi (se instalado): ele traz o próprio
-     * decodificador de software (ffmpeg, "ff-hevc (SW)") e exibe o vídeo — medido saturando os 4
-     * núcleos (~370% de 400%), então engasga um pouco, mas exibe. Embutir um decodificador de
-     * software aqui daria exatamente o mesmo resultado (o gargalo é a CPU, não o software) por
-     * +30MB de APK — por isso delegamos em vez de duplicar.
+     * Quando isso acontece, oferecemos converter o arquivo para H.264 no próprio RenaPlay: o
+     * serviço HEVC264 da rede local recodifica o vídeo e o app SUBSTITUI o arquivo no share,
+     * guardando o original como .hevcbak. Depois disso o RenaPlay reproduz normalmente, com o
+     * decoder H.264 do aparelho.
      */
     private fun warnIfVideoUndecodable(tracks: Tracks) {
         if (hasWarnedUndecodableVideo) return
@@ -411,42 +409,120 @@ class PlaybackVideoFragment : VideoSupportFragment() {
             ?.let { if (it == "HEVC") "H.265 (HEVC)" else it }
             ?: "desconhecido"
 
-        if (handOffToKodi(codec)) return
-
-        Toast.makeText(
-            requireContext(),
-            getString(R.string.playback_video_codec_unsupported, codec),
-            Toast.LENGTH_LONG
-        ).show()
+        promptConvertReplace(codec)
     }
 
     /**
-     * O Kodi registra um intent-filter de ACTION_VIEW para o esquema `smb://` — dá pra mandar o
-     * arquivo direto pro player dele, com as credenciais embutidas na URL (é como o próprio Kodi
-     * guarda fontes de rede). Retorna false se o Kodi não estiver instalado.
+     * Diálogo: avisa que este Fire TV não decodifica o codec e oferece converter+substituir.
      */
-    private fun handOffToKodi(codec: String): Boolean {
+    private fun promptConvertReplace(codec: String) {
+        android.app.AlertDialog.Builder(requireContext())
+            .setTitle(getString(R.string.convert_dialog_title))
+            .setMessage(getString(R.string.convert_dialog_message, codec))
+            .setPositiveButton(getString(R.string.convert_dialog_confirm)) { _, _ -> runConversion() }
+            .setNegativeButton(getString(R.string.convert_dialog_cancel), null)
+            .show()
+    }
+
+    /**
+     * Converte o vídeo usando o serviço HEVC264 da rede local e substitui o arquivo no share.
+     * Fluxo: descobre o serviço (UDP broadcast) → lê o original do SMB e faz upload → acompanha
+     * o progresso (SSE) → baixa o H.264 e grava de volta no share (<base>.mp4), guardando o
+     * original como <arquivo>.hevcbak. Ao concluir, reabre o player no novo arquivo.
+     */
+    private fun runConversion() {
         val context = requireContext()
-        val config = ServerConfigStore.load(context) ?: return false
-        val encodedPath = Uri.encode(videoPath.trimStart('/'), "/")
-        val smbUrl = "smb://${config.user}:${config.password}@${config.ip}/${config.share}/$encodedPath"
+        val config = ServerConfigStore.load(context) ?: return
+        val smb = SmbClientProvider.instance
+        val path = videoPath
+        player?.pause() // sem decoder de vídeo, só haveria áudio sobre tela preta
 
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(Uri.parse(smbUrl), "video/*")
-            setPackage(KODI_PACKAGE)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val progressDialog = android.app.AlertDialog.Builder(context)
+            .setTitle(getString(R.string.convert_progress_title))
+            .setMessage(getString(R.string.convert_progress_starting))
+            .setCancelable(false)
+            .create()
+        progressDialog.show()
+
+        fun setMsg(msg: String) = requireActivity().runOnUiThread { progressDialog.setMessage(msg) }
+
+        lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    val baseUrl = Hevc264Discovery.discover()
+                        ?: ConversionSettingsStore.getServiceUrl(context)
+                    val client = Hevc264Client(baseUrl)
+                    if (!client.health()) {
+                        throw java.io.IOException(getString(R.string.convert_error_no_service))
+                    }
+
+                    // upload do original (streaming direto do SMB)
+                    setMsg(getString(R.string.convert_progress_uploading))
+                    val filename = path.substringAfterLast('/')
+                    val length = smb.fileLength(
+                        config.ip, config.share, path, config.user, config.password, config.domain)
+                    val id = client.upload(filename, length) {
+                        smb.openInputStream(
+                            config.ip, config.share, path, config.user, config.password, config.domain)
+                    }
+
+                    // progresso da conversão no servidor
+                    client.streamProgress(id) { p ->
+                        if (p.error != null) throw java.io.IOException(p.error)
+                        setMsg(getString(R.string.convert_progress_running, p.progress))
+                    }
+
+                    // baixa e grava de volta no share, com swap + backup
+                    setMsg(getString(R.string.convert_progress_saving))
+                    val stem = path.substringBeforeLast('.')
+                    val tmpPath = "$stem.mp4.tmp"
+                    val finalPath = "$stem.mp4"
+                    val backupPath = "$path.hevcbak"
+                    client.download(id) { input ->
+                        smb.openOutputStream(
+                            config.ip, config.share, tmpPath,
+                            config.user, config.password, config.domain).use { out ->
+                            input.copyTo(out, 1 shl 20)
+                        }
+                    }
+                    // remove restos de conversões anteriores (renameTo do jcifs falha se o
+                    // destino já existir) antes de mover original→backup e tmp→final
+                    smb.delete(config.ip, config.share, backupPath,
+                        config.user, config.password, config.domain)
+                    (smb.renameTo(config.ip, config.share, path, backupPath,
+                        config.user, config.password, config.domain) as? SmbResult.Failure)
+                        ?.let { throw java.io.IOException(it.message) }
+                    smb.delete(config.ip, config.share, finalPath,
+                        config.user, config.password, config.domain)
+                    (smb.renameTo(config.ip, config.share, tmpPath, finalPath,
+                        config.user, config.password, config.domain) as? SmbResult.Failure)
+                        ?.let { throw java.io.IOException(it.message) }
+                }
+                progressDialog.dismiss()
+                onConversionDone()
+            } catch (e: Exception) {
+                progressDialog.dismiss()
+                Toast.makeText(
+                    context,
+                    getString(R.string.convert_error, e.message ?: "falha"),
+                    Toast.LENGTH_LONG
+                ).show()
+            }
         }
-        if (intent.resolveActivity(context.packageManager) == null) return false
+    }
 
-        Toast.makeText(
-            context,
-            getString(R.string.playback_handoff_to_kodi, codec),
-            Toast.LENGTH_LONG
-        ).show()
+    private fun onConversionDone() {
+        val context = requireContext()
+        Toast.makeText(context, getString(R.string.convert_done), Toast.LENGTH_LONG).show()
+        val newPath = videoPath.substringBeforeLast('.') + ".mp4"
+        val intent = Intent(context, PlaybackActivity::class.java).apply {
+            putExtra(PlaybackActivity.EXTRA_TITLE, videoTitle)
+            putExtra(PlaybackActivity.EXTRA_PATH, newPath)
+            tmdbId?.let { putExtra(PlaybackActivity.EXTRA_TMDB_ID, it) }
+            mediaType?.let { putExtra(PlaybackActivity.EXTRA_MEDIA_TYPE, it) }
+        }
         startActivity(intent)
-        // Encerra o nosso player: ele só teria áudio sobre tela preta.
         requireActivity().finish()
-        return true
     }
 
     private fun openSubtitleSearch() {

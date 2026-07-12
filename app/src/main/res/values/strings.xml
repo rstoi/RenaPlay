@@ -54,8 +54,19 @@
     <string name="subtitle_download_needs_key">Configure sua chave OpenSubtitles em Ajustes para baixar esta legenda.</string>
 
     <!-- Player -->
-    <string name="playback_handoff_to_kodi">Vídeo %1$s: este Fire TV não decodifica esse formato — abrindo no Kodi…</string>
-    <string name="playback_video_codec_unsupported">Este Fire TV não decodifica vídeo %1$s — só o áudio será reproduzido. Converta o arquivo para H.264 (x264) ou use outro player.</string>
+    <!-- Conversão de vídeo indecodificável (HEVC) via serviço web transcode-smb -->
+    <string name="convert_dialog_title">Vídeo não compatível</string>
+    <string name="convert_dialog_message">Este Fire TV não decodifica vídeo %1$s. Deseja converter para H.264 e substituir o arquivo? O original fica guardado como backup. A conversão leva alguns minutos.</string>
+    <string name="convert_dialog_confirm">Converter e substituir</string>
+    <string name="convert_dialog_cancel">Cancelar</string>
+    <string name="convert_progress_title">Convertendo vídeo…</string>
+    <string name="convert_progress_starting">Procurando o serviço de conversão…</string>
+    <string name="convert_progress_uploading">Enviando o vídeo para o servidor…</string>
+    <string name="convert_progress_running">Convertendo… %1$d%%</string>
+    <string name="convert_progress_saving">Salvando a versão convertida…</string>
+    <string name="convert_done">Pronto! Reproduzindo a versão em H.264.</string>
+    <string name="convert_error">Falha na conversão: %1$s</string>
+    <string name="convert_error_no_service">Serviço de conversão HEVC264 não encontrado na rede local.</string>
 
     <!-- Player: faixas de áudio/legenda -->
     <string name="track_picker_subtitles_title">Legendas</string>
