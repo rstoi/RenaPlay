@@ -53,6 +53,9 @@
     <string name="subtitle_searching">Buscando legendas…</string>
     <string name="subtitle_download_needs_key">Configure sua chave OpenSubtitles em Ajustes para baixar esta legenda.</string>
 
+    <!-- Player -->
+    <string name="playback_video_codec_unsupported">Este Fire TV não decodifica vídeo %1$s — só o áudio será reproduzido. Converta o arquivo para H.264 (x264) ou use outro player.</string>
+
     <!-- Player: faixas de áudio/legenda -->
     <string name="track_picker_subtitles_title">Legendas</string>
     <string name="track_picker_audio_title">Áudio</string>

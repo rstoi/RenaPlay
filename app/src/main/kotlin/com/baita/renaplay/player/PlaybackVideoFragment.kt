@@ -8,6 +8,7 @@ import android.os.Looper
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.addCallback
 import androidx.leanback.app.VideoSupportFragment
 import androidx.leanback.app.VideoSupportFragmentGlueHost
@@ -59,6 +60,7 @@ class PlaybackVideoFragment : VideoSupportFragment() {
     private var progressHandler: Handler? = null
     private var hasAppliedResume = false
     private var hasSentPlayEvent = false
+    private var hasWarnedUndecodableVideo = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -115,6 +117,10 @@ class PlaybackVideoFragment : VideoSupportFragment() {
         // VideoSupportFragment não tem um SubtitleView embutido: sem isso, o ExoPlayer
         // seleciona a faixa de texto normalmente, mas nenhum texto aparece na tela.
         exoPlayer.addListener(object : Player.Listener {
+            override fun onTracksChanged(tracks: Tracks) {
+                warnIfVideoUndecodable(tracks)
+            }
+
             override fun onCues(cueGroup: CueGroup) {
                 subtitleView.setCues(cueGroup.cues)
             }
@@ -372,6 +378,36 @@ class PlaybackVideoFragment : VideoSupportFragment() {
                 .getOrDefault(lang)
             else -> "$fallbackPrefix $index"
         }
+    }
+
+    /**
+     * Este Fire TV Stick (AFTSS/MediaTek, Fire OS 7) NÃO expõe nenhum decodificador HEVC/H.265 a
+     * apps de terceiros — verificado com MediaCodecList: só aparecem AVC, H.263, MPEG-2, MPEG-4,
+     * VP8 e VP9, embora o /vendor/etc declare decoders HEVC (a Amazon os reserva aos apps dela).
+     * Sem decodificador, o ExoPlayer classifica a faixa de vídeo como UNSUPPORTED_SUBTYPE e
+     * simplesmente não a seleciona: o áudio toca e a tela fica PRETA, sem erro nenhum — o pior
+     * tipo de falha, silenciosa. Aqui detectamos isso e dizemos ao usuário o que está havendo.
+     * (O VLC consegue exibir esses arquivos porque traz o próprio decodificador de software.)
+     */
+    private fun warnIfVideoUndecodable(tracks: Tracks) {
+        if (hasWarnedUndecodableVideo) return
+        val videoGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_VIDEO }
+        if (videoGroups.isEmpty()) return
+        val anySupported = videoGroups.any { group ->
+            (0 until group.length).any { group.isTrackSupported(it) }
+        }
+        if (anySupported) return
+
+        hasWarnedUndecodableVideo = true
+        val codec = videoGroups.first().getTrackFormat(0).sampleMimeType
+            ?.substringAfterLast('/')?.uppercase()
+            ?.let { if (it == "HEVC") "H.265 (HEVC)" else it }
+            ?: "desconhecido"
+        Toast.makeText(
+            requireContext(),
+            getString(R.string.playback_video_codec_unsupported, codec),
+            Toast.LENGTH_LONG
+        ).show()
     }
 
     private fun openSubtitleSearch() {
