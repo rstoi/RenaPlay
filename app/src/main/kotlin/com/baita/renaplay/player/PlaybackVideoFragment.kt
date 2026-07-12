@@ -94,15 +94,18 @@ class PlaybackVideoFragment : VideoSupportFragment() {
                     .setDataSourceFactory(CompositeDataSourceFactory(requireContext(), config))
             )
             // Buffers maiores que o padrão do ExoPlayer: streaming via SMB tem latência mais
-            // variável que HTTP/CDN (autenticação por arquivo, throughput de Wi-Fi variável),
-            // então um buffer maior absorve esses picos sem re-bufferizar no meio do vídeo.
+            // variável que HTTP/CDN, então um buffer grande absorve esses picos sem re-bufferizar
+            // no meio do vídeo. Mesma ideia do cache de read-ahead do Kodi (advancedsettings
+            // memorysize/readfactor): com o pipeline paralelo de [SmbDataSource] o throughput medido
+            // (~1,8 MB/s) é várias vezes o bitrate típico dos arquivos, então dá pra encher um
+            // buffer grande rápido e ficar com folga.
             .setLoadControl(
                 DefaultLoadControl.Builder()
                     .setBufferDurationsMs(
-                        30_000, // mín. antes de arriscar rebuffer
-                        120_000, // máx. mantido em buffer
-                        1_500, // mín. pra iniciar playback
-                        3_000 // mín. pra retomar após rebuffer
+                        60_000, // mín. antes de arriscar rebuffer
+                        300_000, // máx. mantido em buffer
+                        1_500, // mín. pra iniciar playback (não atrasa o primeiro frame)
+                        5_000 // mín. pra retomar após rebuffer
                     )
                     .build()
             )
