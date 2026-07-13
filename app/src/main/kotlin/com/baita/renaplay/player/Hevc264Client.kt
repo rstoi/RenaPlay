@@ -6,6 +6,7 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSink
 import okio.source
 import org.json.JSONObject
@@ -15,6 +16,7 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.SocketTimeoutException
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 
@@ -125,6 +127,24 @@ class Hevc264Client(baseUrl: String) {
                 }
             }
         }
+        // /upload_raw manda o arquivo como corpo cru. O /upload multipart faz o serviço gravar o
+        // vídeo DUAS vezes — o Werkzeug materializa o multipart num temporário e depois copia
+        // 1,3GB para a pasta de trabalho, cópia que só começa depois do último byte chegar. Era
+        // esse o silêncio de mais de 20 minutos entre "enviando 100%" e o começo da conversão.
+        //
+        // O suporte é sondado ANTES de mandar o arquivo, e não descobrindo pelo 404 da resposta:
+        // um serviço antigo só recusaria a rota depois de engolir o 1,3GB, e o fallback subiria
+        // tudo de novo.
+        if (supportsRawUpload()) {
+            val name = URLEncoder.encode(filename, "UTF-8")
+            val rawReq = Request.Builder().url("$base/upload_raw?name=$name").post(fileBody).build()
+            http.newCall(rawReq).execute().use { r ->
+                val text = r.body?.string().orEmpty()
+                if (!r.isSuccessful) throw IOException("upload HTTP ${r.code}")
+                return JSONObject(text).getString("id")
+            }
+        }
+
         val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("file", filename, fileBody)
             .build()
@@ -134,6 +154,21 @@ class Hevc264Client(baseUrl: String) {
             if (!r.isSuccessful) throw IOException("upload HTTP ${r.code}")
             return JSONObject(text).getString("id")
         }
+    }
+
+    /**
+     * O serviço conhece /upload_raw? Sonda com um corpo vazio: a versão nova recusa por falta de
+     * Content-Length (411), a antiga não tem a rota (404). Qualquer resposta que não seja
+     * "rota inexistente" significa que ela existe.
+     */
+    private fun supportsRawUpload(): Boolean = try {
+        val probe = Request.Builder()
+            .url("$base/upload_raw")
+            .post(ByteArray(0).toRequestBody(null))
+            .build()
+        http.newCall(probe).execute().use { it.code != 404 && it.code != 405 }
+    } catch (e: Exception) {
+        false
     }
 
     /** Consome o SSE de /progress/<id>, chamando onProgress a cada evento (bloqueante). */
