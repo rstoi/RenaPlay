@@ -62,8 +62,12 @@
     <string name="convert_progress_title">Convertendo vídeo…</string>
     <string name="convert_progress_starting">Procurando o serviço de conversão…</string>
     <string name="convert_progress_uploading">Enviando o vídeo para o servidor…</string>
+    <string name="convert_progress_uploading_pct">Enviando o vídeo para o servidor… %1$d%%</string>
+    <string name="convert_progress_processing">O servidor está recebendo o vídeo…</string>
     <string name="convert_progress_running">Convertendo… %1$d%%</string>
+    <string name="convert_progress_downloading_pct">Baixando a versão convertida… %1$d%%</string>
     <string name="convert_progress_saving">Salvando a versão convertida…</string>
+    <string name="convert_progress_background">Continuar em segundo plano</string>
     <string name="convert_done">Pronto! Reproduzindo a versão em H.264.</string>
     <string name="convert_error">Falha na conversão: %1$s</string>
     <string name="convert_error_no_service">Serviço de conversão HEVC264 não encontrado na rede local.</string>
