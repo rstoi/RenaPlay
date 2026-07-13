@@ -1,6 +1,8 @@
 package com.baita.renaplay.conversion
 
 import android.content.Context
+import android.content.Intent
+import androidx.core.content.ContextCompat
 import com.baita.renaplay.data.ConversionSettingsStore
 import com.baita.renaplay.data.ServerConfig
 import com.baita.renaplay.player.Hevc264Client
@@ -74,6 +76,12 @@ object ConversionManager {
         val app = context.applicationContext
         var job = ConversionJob(path, title, ConversionPhase.DISCOVERING)
         publish(job)
+
+        // Sem isto o processo é morto no meio do trabalho: o Fire TV tem 922MB de RAM e o app,
+        // uma vez em background, é o primeiro a cair. O serviço não converte nada — só segura o
+        // processo vivo enquanto este job roda. Publicar o job ANTES de subir o serviço evita que
+        // ele acorde, não veja job rodando e se encerre na hora.
+        ContextCompat.startForegroundService(app, Intent(app, ConversionService::class.java))
 
         scope.launch {
             fun phase(p: ConversionPhase, percent: Int = 0) {
