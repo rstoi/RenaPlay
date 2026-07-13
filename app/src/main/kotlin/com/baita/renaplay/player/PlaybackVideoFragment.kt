@@ -29,7 +29,9 @@ import androidx.media3.ui.leanback.LeanbackPlayerAdapter
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.baita.renaplay.R
-import com.baita.renaplay.data.ConversionSettingsStore
+import com.baita.renaplay.conversion.ConversionJob
+import com.baita.renaplay.conversion.ConversionManager
+import com.baita.renaplay.conversion.ConversionPhase
 import com.baita.renaplay.data.ServerConfig
 import com.baita.renaplay.data.ServerConfigStore
 import com.baita.renaplay.data.SucaAuthStore
@@ -59,6 +61,7 @@ class PlaybackVideoFragment : VideoSupportFragment() {
     private var tmdbId: Int? = null
     private var mediaType: String? = null
     private var progressHandler: Handler? = null
+    private var conversionDialog: android.app.AlertDialog? = null
     private var hasAppliedResume = false
     private var hasSentPlayEvent = false
     private var hasWarnedUndecodableVideo = false
@@ -189,6 +192,10 @@ class PlaybackVideoFragment : VideoSupportFragment() {
         // listagem SMB e o download de um arquivo inteiro) pra não atrasar o primeiro frame.
         exoPlayer.setMediaItem(MediaItem.Builder().setUri(smbPathToUri(videoPath)).build())
         exoPlayer.prepare()
+
+        // Reabrir um vídeo cuja conversão ainda está rolando traz a tela de progresso de volta,
+        // em vez de tentar tocar um arquivo que está prestes a ser substituído.
+        observeConversion()
 
         lifecycleScope.launch {
             val subtitleConfig = resolveSubtitleConfig(config, videoPath, subtitleLocalPath, subtitleSmbPath)
@@ -428,102 +435,92 @@ class PlaybackVideoFragment : VideoSupportFragment() {
         android.app.AlertDialog.Builder(requireContext())
             .setTitle(getString(R.string.convert_dialog_title))
             .setMessage(getString(R.string.convert_dialog_message, codec))
-            .setPositiveButton(getString(R.string.convert_dialog_confirm)) { _, _ -> runConversion() }
+            .setPositiveButton(getString(R.string.convert_dialog_confirm)) { _, _ -> startConversion() }
             .setNegativeButton(getString(R.string.convert_dialog_cancel), null)
             .show()
     }
 
+    private fun startConversion() {
+        val config = ServerConfigStore.load(requireContext()) ?: return
+        ConversionManager.start(requireContext(), config, videoPath, videoTitle)
+    }
+
     /**
-     * Converte o vídeo usando o serviço HEVC264 da rede local e substitui o arquivo no share.
-     * Fluxo: descobre o serviço (UDP broadcast) → lê o original do SMB e faz upload → acompanha
-     * o progresso (SSE) → baixa o H.264 e grava de volta no share (<base>.mp4), guardando o
-     * original como <arquivo>.hevcbak. Ao concluir, reabre o player no novo arquivo.
+     * Espelha na tela o job de conversão deste vídeo, se existir. É o mesmo caminho para os dois
+     * casos: acabei de disparar a conversão, ou reabri um vídeo cuja conversão já estava rolando
+     * (o StateFlow entrega o estado corrente assim que a coleta começa, então a tela de progresso
+     * reaparece sozinha). Quem executa é o [ConversionManager], que vive fora desta tela.
      */
-    private fun runConversion() {
-        val context = requireContext()
-        val config = ServerConfigStore.load(context) ?: return
-        val smb = SmbClientProvider.instance
-        val path = videoPath
-        player?.pause() // sem decoder de vídeo, só haveria áudio sobre tela preta
-
-        val progressDialog = android.app.AlertDialog.Builder(context)
-            .setTitle(getString(R.string.convert_progress_title))
-            .setMessage(getString(R.string.convert_progress_starting))
-            .setCancelable(false)
-            .create()
-        progressDialog.show()
-
-        fun setMsg(msg: String) = requireActivity().runOnUiThread { progressDialog.setMessage(msg) }
-
+    private fun observeConversion() {
+        // lifecycleScope, e não viewLifecycleOwner: isto é chamado de onCreate, quando a View
+        // ainda não existe — viewLifecycleOwner estoura ali (IllegalStateException).
         lifecycleScope.launch {
-            try {
-                withContext(Dispatchers.IO) {
-                    val baseUrl = Hevc264Discovery.discover()
-                        ?: ConversionSettingsStore.getServiceUrl(context)
-                    val client = Hevc264Client(baseUrl)
-                    if (!client.health()) {
-                        throw java.io.IOException(getString(R.string.convert_error_no_service))
-                    }
-
-                    // upload do original (streaming direto do SMB)
-                    setMsg(getString(R.string.convert_progress_uploading))
-                    val filename = path.substringAfterLast('/')
-                    val length = smb.fileLength(
-                        config.ip, config.share, path, config.user, config.password, config.domain)
-                    val id = client.upload(filename, length) {
-                        smb.openInputStream(
-                            config.ip, config.share, path, config.user, config.password, config.domain)
-                    }
-
-                    // progresso da conversão no servidor
-                    client.streamProgress(id) { p ->
-                        if (p.error != null) throw java.io.IOException(p.error)
-                        setMsg(getString(R.string.convert_progress_running, p.progress))
-                    }
-
-                    // baixa e grava de volta no share, com swap + backup
-                    setMsg(getString(R.string.convert_progress_saving))
-                    val stem = path.substringBeforeLast('.')
-                    val tmpPath = "$stem.mp4.tmp"
-                    val finalPath = "$stem.mp4"
-                    val backupPath = "$path.hevcbak"
-                    client.download(id) { input ->
-                        smb.openOutputStream(
-                            config.ip, config.share, tmpPath,
-                            config.user, config.password, config.domain).use { out ->
-                            input.copyTo(out, 1 shl 20)
-                        }
-                    }
-                    // remove restos de conversões anteriores (renameTo do jcifs falha se o
-                    // destino já existir) antes de mover original→backup e tmp→final
-                    smb.delete(config.ip, config.share, backupPath,
-                        config.user, config.password, config.domain)
-                    (smb.renameTo(config.ip, config.share, path, backupPath,
-                        config.user, config.password, config.domain) as? SmbResult.Failure)
-                        ?.let { throw java.io.IOException(it.message) }
-                    smb.delete(config.ip, config.share, finalPath,
-                        config.user, config.password, config.domain)
-                    (smb.renameTo(config.ip, config.share, tmpPath, finalPath,
-                        config.user, config.password, config.domain) as? SmbResult.Failure)
-                        ?.let { throw java.io.IOException(it.message) }
-                }
-                progressDialog.dismiss()
-                onConversionDone()
-            } catch (e: Exception) {
-                progressDialog.dismiss()
-                Toast.makeText(
-                    context,
-                    getString(R.string.convert_error, e.message ?: "falha"),
-                    Toast.LENGTH_LONG
-                ).show()
+            ConversionManager.jobs.collect { all ->
+                val job = all[videoPath] ?: return@collect
+                renderConversion(job)
             }
         }
     }
 
-    private fun onConversionDone() {
-        val context = requireContext()
-        Toast.makeText(context, getString(R.string.convert_done), Toast.LENGTH_LONG).show()
-        val newPath = videoPath.substringBeforeLast('.') + ".mp4"
+    private fun renderConversion(job: ConversionJob) {
+        val context = context ?: return
+        when (job.phase) {
+            ConversionPhase.DONE -> {
+                dismissConversionDialog()
+                ConversionManager.clear(job.path)
+                Toast.makeText(context, getString(R.string.convert_done), Toast.LENGTH_LONG).show()
+                job.newPath?.let { openConverted(it) }
+            }
+            ConversionPhase.FAILED -> {
+                dismissConversionDialog()
+                ConversionManager.clear(job.path)
+                Toast.makeText(
+                    context,
+                    getString(R.string.convert_error, job.error ?: "falha"),
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            else -> {
+                // Sem decoder de vídeo, deixar o player rodando só daria áudio sobre tela preta.
+                player?.pause()
+                showConversionDialog().setMessage(phaseMessage(job))
+            }
+        }
+    }
+
+    private fun phaseMessage(job: ConversionJob): String = when (job.phase) {
+        ConversionPhase.DISCOVERING -> getString(R.string.convert_progress_starting)
+        ConversionPhase.UPLOADING -> getString(R.string.convert_progress_uploading_pct, job.percent)
+        ConversionPhase.PROCESSING -> getString(R.string.convert_progress_processing)
+        ConversionPhase.CONVERTING -> getString(R.string.convert_progress_running, job.percent)
+        ConversionPhase.DOWNLOADING -> getString(R.string.convert_progress_downloading_pct, job.percent)
+        else -> getString(R.string.convert_progress_saving)
+    }
+
+    private fun showConversionDialog(): android.app.AlertDialog {
+        conversionDialog?.let { return it }
+        // Cancelável: sair da tela NÃO cancela a conversão — ela continua no ConversionManager, e
+        // reabrir o vídeo traz o progresso de volta.
+        val dialog = android.app.AlertDialog.Builder(requireContext())
+            .setTitle(getString(R.string.convert_progress_title))
+            .setMessage(getString(R.string.convert_progress_starting))
+            .setNegativeButton(getString(R.string.convert_progress_background)) { _, _ ->
+                dismissConversionDialog()
+                requireActivity().finish()
+            }
+            .create()
+        dialog.show()
+        conversionDialog = dialog
+        return dialog
+    }
+
+    private fun dismissConversionDialog() {
+        conversionDialog?.dismiss()
+        conversionDialog = null
+    }
+
+    private fun openConverted(newPath: String) {
+        val context = context ?: return
         val intent = Intent(context, PlaybackActivity::class.java).apply {
             putExtra(PlaybackActivity.EXTRA_TITLE, videoTitle)
             putExtra(PlaybackActivity.EXTRA_PATH, newPath)
@@ -533,6 +530,7 @@ class PlaybackVideoFragment : VideoSupportFragment() {
         startActivity(intent)
         requireActivity().finish()
     }
+
 
     private fun openSubtitleSearch() {
         val intent = Intent(requireContext(), SubtitleSearchActivity::class.java).apply {

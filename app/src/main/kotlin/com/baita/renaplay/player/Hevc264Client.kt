@@ -88,13 +88,41 @@ class Hevc264Client(baseUrl: String) {
         false
     }
 
-    /** Upload streaming (sem carregar o arquivo na memória). Retorna o id do job. */
-    fun upload(filename: String, contentLength: Long, openStream: () -> InputStream): String {
+    /**
+     * Upload streaming (sem carregar o arquivo na memória). Retorna o id do job.
+     *
+     * [onProgress] recebe 0..100 conforme os bytes saem. Um filme de 1,3GB leva ~12 min só para
+     * subir, na velocidade de leitura do SMB — sem esse retorno, o diálogo ficava parado em
+     * "Enviando o vídeo…" esse tempo todo e parecia travado.
+     */
+    fun upload(
+        filename: String,
+        contentLength: Long,
+        onProgress: (Int) -> Unit = {},
+        openStream: () -> InputStream
+    ): String {
         val fileBody = object : RequestBody() {
             override fun contentType() = "video/octet-stream".toMediaTypeOrNull()
             override fun contentLength() = contentLength
             override fun writeTo(sink: BufferedSink) {
-                openStream().use { input -> sink.writeAll(input.source()) }
+                openStream().use { input ->
+                    val buffer = ByteArray(1 shl 16)
+                    var sent = 0L
+                    var lastPct = -1
+                    while (true) {
+                        val n = input.read(buffer)
+                        if (n == -1) break
+                        sink.write(buffer, 0, n)
+                        sent += n
+                        if (contentLength > 0) {
+                            val pct = ((sent * 100) / contentLength).toInt().coerceIn(0, 100)
+                            if (pct != lastPct) {
+                                lastPct = pct
+                                onProgress(pct)
+                            }
+                        }
+                    }
+                }
             }
         }
         val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
@@ -140,13 +168,48 @@ class Hevc264Client(baseUrl: String) {
         }
     }
 
-    /** Baixa o convertido, entregando o InputStream para gravação direta (sem temp local). */
-    fun download(id: String, writeTo: (InputStream) -> Unit) {
+    /**
+     * Baixa o convertido, entregando o InputStream para gravação direta (sem temp local).
+     * [onProgress] recebe 0..100 — o arquivo volta pela rede e é gravado no SMB, o que também
+     * leva minutos num filme.
+     */
+    fun download(id: String, onProgress: (Int) -> Unit = {}, writeTo: (InputStream) -> Unit) {
         val req = Request.Builder().url("$base/download/$id").get().build()
         http.newCall(req).execute().use { r ->
             if (!r.isSuccessful) throw IOException("download HTTP ${r.code}")
             val body = r.body ?: throw IOException("sem corpo em /download")
-            writeTo(body.byteStream())
+            val total = body.contentLength()
+            val stream = if (total > 0) ProgressInputStream(body.byteStream(), total, onProgress)
+                         else body.byteStream()
+            writeTo(stream)
         }
     }
+}
+
+/** Conta os bytes lidos e reporta a porcentagem, sem bufferizar nada. */
+private class ProgressInputStream(
+    private val delegate: InputStream,
+    private val total: Long,
+    private val onProgress: (Int) -> Unit
+) : InputStream() {
+    private var read = 0L
+    private var lastPct = -1
+
+    private fun advance(n: Int) {
+        if (n <= 0) return
+        read += n
+        val pct = ((read * 100) / total).toInt().coerceIn(0, 100)
+        if (pct != lastPct) {
+            lastPct = pct
+            onProgress(pct)
+        }
+    }
+
+    override fun read(): Int = delegate.read().also { if (it != -1) advance(1) }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int =
+        delegate.read(b, off, len).also { advance(it) }
+
+    override fun available(): Int = delegate.available()
+    override fun close() = delegate.close()
 }
