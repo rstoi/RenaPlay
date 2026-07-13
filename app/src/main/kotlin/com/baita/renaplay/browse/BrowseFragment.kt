@@ -22,6 +22,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.baita.renaplay.R
 import com.baita.renaplay.brand.BrandWordmark
+import com.baita.renaplay.data.EpisodeThumbnailStore
 import com.baita.renaplay.data.LibraryCacheStore
 import com.baita.renaplay.data.ServerConfigStore
 import com.baita.renaplay.data.SucaAuthStore
@@ -291,8 +292,24 @@ class BrowseFragment : BrowseSupportFragment() {
                     val media = itemsAdapter.get(index) as? MediaItem ?: continue
                     if (media.remotePosterUrl != null || media.category !in POSTER_ELIGIBLE_CATEGORIES) continue
 
+                    // Episódio em "Continuar assistindo": se a tela de episódios já extraiu um
+                    // frame dele, reaproveita (consulta só o disco, não a rede).
+                    val cachedThumb = if (media.kind == MediaKind.SERIES) {
+                        EpisodeThumbnailStore.cachedUri(context, media.path)
+                    } else null
+                    if (cachedThumb != null) {
+                        itemsAdapter.replace(index, media.copy(remotePosterUrl = cachedThumb))
+                        continue
+                    }
+
+                    // Sem frame: cai no pôster da SÉRIE. Buscar pelo título do episódio não casa
+                    // com nada no TMDB, que não indexa episódios — daí o seriesName().
+                    val query = if (media.kind == MediaKind.SERIES) {
+                        TitleCleaner.seriesName(media.title)
+                    } else media.title
+
                     val match = withContext(Dispatchers.IO) {
-                        PosterLookup.resolve(context, session, media.kind, media.title)
+                        PosterLookup.resolve(context, session, media.kind, query)
                     }
 
                     if (match?.posterUrl != null) {

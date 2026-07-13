@@ -88,6 +88,24 @@ object TitleCleaner {
      */
     fun searchQuery(title: String): String = TRAILING_YEAR.replace(title, "").trim()
 
+    // Os dois jeitos como um episódio aparece nos títulos desta biblioteca — os mesmos que o
+    // MediaScanner reconhece: "Mad Men S01E02 Ladies Room" e "Taken - 09 - John".
+    private val EPISODE_TAIL_SXXEXX = Regex("(?i)\\s*[-–]?\\s*S\\d{1,2}E\\d{1,3}.*$")
+    private val EPISODE_TAIL_NUMBERED = Regex("\\s*-\\s+\\d{1,3}\\s+-.*$")
+
+    /**
+     * Nome da série a partir do título de um episódio ("Mad Men S01E02 Ladies Room" → "Mad Men").
+     * O TMDB não indexa episódios por título: buscar a linha inteira não casa com nada, e é por
+     * isso que os episódios em "Continuar assistindo" ficavam sem pôster. Um título que não seja
+     * de episódio volta inalterado.
+     */
+    fun seriesName(episodeTitle: String): String {
+        val withoutEpisode = EPISODE_TAIL_NUMBERED.replace(
+            EPISODE_TAIL_SXXEXX.replace(episodeTitle, ""), ""
+        )
+        return withoutEpisode.trim().trimEnd('-').trim().ifBlank { episodeTitle }
+    }
+
     private fun smartTitleCase(s: String): String {
         val allSameCase = s == s.lowercase() || s == s.uppercase()
         if (!allSameCase) return s
