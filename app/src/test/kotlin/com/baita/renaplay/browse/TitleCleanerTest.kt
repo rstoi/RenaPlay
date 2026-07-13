@@ -14,6 +14,41 @@ class TitleCleanerTest {
     }
 
     @Test
+    fun `seriesTitleFromPath keeps the year, so the right Taken is matched`() {
+        // O ano é o que separa a minissérie de 2002 da série homônima de 2017 — sem ele, o
+        // PosterLookup pega o primeiro resultado e as duas telas mostram pôsteres diferentes.
+        assertEquals(
+            "Taken (2002)",
+            TitleCleaner.seriesTitleFromPath("tv shows/taken 2002/Taken - 09 - John.avi")
+        )
+    }
+
+    @Test
+    fun `seriesTitleFromPath ignores season and quality subfolders`() {
+        // Os caminhos reais da biblioteca: a pasta da série está sempre logo abaixo de "tv shows",
+        // e o que vem depois (Season 4, "Mad Men S01 (360p re-blurip)") não interessa.
+        assertEquals(
+            "In Treatment (2008)",
+            TitleCleaner.seriesTitleFromPath(
+                "tv shows/In Treatment 2008/Season 4/In Treatment (2008) - S04E12 - Brooke.mkv"
+            )
+        )
+        // O clean() ainda derruba o "S01-S04" da pasta, então sobra o nome da série com o ano —
+        // exatamente o mesmo texto que a lista de séries usa para buscar o pôster.
+        assertEquals(
+            "Mad Men (2007)",
+            TitleCleaner.seriesTitleFromPath(
+                "tv shows/Mad Men S01-S04 (2007-)/Mad Men S01 (360p re-blurip)/Mad Men S01E02 Ladies Room.mp4"
+            )
+        )
+    }
+
+    @Test
+    fun `seriesTitleFromPath returns null when there is no series folder`() {
+        assertEquals(null, TitleCleaner.seriesTitleFromPath("tv shows/episodio-solto.mkv"))
+    }
+
+    @Test
     fun `seriesName leaves a non-episode title untouched`() {
         assertEquals("Mad Men", TitleCleaner.seriesName("Mad Men"))
         assertEquals("Pressure (2026)", TitleCleaner.seriesName("Pressure (2026)"))

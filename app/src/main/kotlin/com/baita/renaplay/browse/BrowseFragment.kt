@@ -303,9 +303,15 @@ class BrowseFragment : BrowseSupportFragment() {
                     }
 
                     // Sem frame: cai no pôster da SÉRIE. Buscar pelo título do episódio não casa
-                    // com nada no TMDB, que não indexa episódios — daí o seriesName().
+                    // com nada no TMDB, que não indexa episódios.
+                    //
+                    // O nome vem da PASTA, não do título do episódio: a pasta carrega o ano
+                    // ("taken 2002") e é dele que o PosterLookup precisa para não confundir a
+                    // minissérie de 2002 com a série homônima de 2017. É também a mesma pasta que
+                    // a lista de séries usa — as duas telas chegam ao mesmo pôster por construção.
                     val query = if (media.kind == MediaKind.SERIES) {
-                        TitleCleaner.seriesName(media.title)
+                        TitleCleaner.seriesTitleFromPath(media.path)
+                            ?: TitleCleaner.seriesName(media.title)
                     } else media.title
 
                     val match = withContext(Dispatchers.IO) {

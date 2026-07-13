@@ -99,6 +99,26 @@ object TitleCleaner {
      * isso que os episódios em "Continuar assistindo" ficavam sem pôster. Um título que não seja
      * de episódio volta inalterado.
      */
+    /**
+     * Título da série a partir do CAMINHO do episódio:
+     * "tv shows/taken 2002/Taken - 09 - John.avi" → "Taken (2002)".
+     *
+     * É a mesma pasta de onde o [MediaScanner] tira o título da série, e isso não é um detalhe: o
+     * ano é o que faz o PosterLookup escolher certo. "Taken" sozinho casa com a série de 2017, e
+     * era por isso que a mesma série aparecia com um pôster em "Continuar assistindo" e outro na
+     * lista de séries. Derivando daqui, as duas telas usam a mesma chave e chegam ao mesmo pôster.
+     *
+     * Devolve null quando o caminho não tem pasta de série (episódio solto na raiz), e aí o
+     * chamador cai no [seriesName] do título.
+     */
+    fun seriesTitleFromPath(path: String): String? {
+        val dirs = path.split('/').dropLast(1).filter { it.isNotBlank() }
+        // [0] é a pasta raiz da categoria ("tv shows"); [1] é a pasta da série. Temporadas e
+        // pastas de qualidade ficam abaixo disso e são justamente o que não queremos.
+        val folder = dirs.getOrNull(1) ?: return null
+        return clean(folder).takeIf { it.isNotBlank() }
+    }
+
     fun seriesName(episodeTitle: String): String {
         val withoutEpisode = EPISODE_TAIL_NUMBERED.replace(
             EPISODE_TAIL_SXXEXX.replace(episodeTitle, ""), ""
