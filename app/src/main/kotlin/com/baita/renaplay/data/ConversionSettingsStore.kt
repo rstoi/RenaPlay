@@ -1,16 +1,24 @@
 package com.baita.renaplay.data
 
 import android.content.Context
+import com.baita.renaplay.BuildConfig
 
 /**
- * URL do serviço web de conversão (transcode-smb) que roda no Mac da rede local.
- * O RenaPlay envia o caminho SMB do vídeo e o serviço converte o HEVC para H.264
- * e substitui o arquivo no share (guardando backup .hevcbak do original).
+ * URL do serviço HEVC264 da rede local, que recodifica HEVC para H.264.
+ *
+ * Só é usada como fallback: o caminho normal é a descoberta por broadcast UDP
+ * (Hevc264Discovery). Vale configurar quando o broadcast não chega — redes que o bloqueiam,
+ * ou serviço em outra sub-rede.
+ *
+ * O valor inicial vem de `renaplay.convert.url` no local.properties (gitignored) via BuildConfig;
+ * sem ele, fica vazio e só a descoberta funciona. A tela de ajustes sobrescreve.
  */
 object ConversionSettingsStore {
     private const val PREFS = "renaplay_conversion"
     private const val KEY_SERVICE_URL = "service_url"
-    const val DEFAULT_SERVICE_URL = "http://192.168.1.102:8765"
+
+    /** Vazio quando não configurado — a descoberta UDP é quem acha o serviço. */
+    val DEFAULT_SERVICE_URL: String = BuildConfig.SEED_CONVERT_URL.trim().trimEnd('/')
 
     fun getServiceUrl(context: Context): String {
         val url = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

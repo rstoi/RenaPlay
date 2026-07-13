@@ -1,7 +1,20 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+/**
+ * Configuração inicial da instalação (IP do servidor, share, credenciais, serviço de conversão).
+ * Fica em local.properties, que é gitignored — nada disso vai para o repositório. Ver
+ * local.properties.example para as chaves. Toda chave ausente vira "", e aí o app simplesmente
+ * pede os dados na tela de setup: o build funciona sem nenhuma delas.
+ */
+val localConfig = Properties().apply {
+    rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+}
+fun seed(key: String): String = localConfig.getProperty(key, "")
 
 android {
     namespace = "com.baita.renaplay"
@@ -13,6 +26,13 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+
+        buildConfigField("String", "SEED_SMB_IP", "\"${seed("renaplay.smb.ip")}\"")
+        buildConfigField("String", "SEED_SMB_SHARE", "\"${seed("renaplay.smb.share")}\"")
+        buildConfigField("String", "SEED_SMB_USER", "\"${seed("renaplay.smb.user")}\"")
+        buildConfigField("String", "SEED_SMB_PASSWORD", "\"${seed("renaplay.smb.password")}\"")
+        buildConfigField("String", "SEED_SMB_DOMAIN", "\"${seed("renaplay.smb.domain")}\"")
+        buildConfigField("String", "SEED_CONVERT_URL", "\"${seed("renaplay.convert.url")}\"")
     }
 
     buildTypes {
@@ -32,6 +52,7 @@ android {
 
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 
     sourceSets["main"].kotlin.srcDirs("src/main/kotlin")

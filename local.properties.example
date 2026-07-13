@@ -1,0 +1,21 @@
+# Configuração inicial do RenaPlay.
+#
+# Copie para `local.properties` (que é gitignored) e preencha. O Gradle injeta os valores em
+# BuildConfig, e na primeira execução o app já sobe apontado para o seu servidor — sem digitar
+# IP, share e senha no controle remoto da TV.
+#
+# Tudo aqui é OPCIONAL: sem estas chaves o build funciona igual e o app abre no assistente de
+# setup. E o que o usuário configurar na TV sempre vence a semente.
+
+# --- Servidor SMB com os vídeos ---
+# O share pode incluir um subcaminho (ex.: backup-500gb/midia) para o app começar já na pasta certa.
+renaplay.smb.ip=192.168.1.10
+renaplay.smb.share=meu-share/midia
+renaplay.smb.user=usuario
+renaplay.smb.password=senha
+renaplay.smb.domain=
+
+# --- Serviço HEVC264 (converte HEVC para H.264 quando o aparelho não decodifica) ---
+# Normalmente NÃO precisa: o app descobre o serviço sozinho por broadcast UDP na porta 8766.
+# Preencha só se o broadcast não chegar (rede que bloqueia, ou serviço em outra sub-rede).
+renaplay.convert.url=http://192.168.1.20:8765

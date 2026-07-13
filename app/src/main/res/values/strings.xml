@@ -21,7 +21,7 @@
     <string name="setup_ip_invalid">Digite um endereço IP.</string>
     <string name="setup_user_pass_desc">Digite o usuário e a senha do compartilhamento</string>
     <string name="setup_loading_shares">Carregando pastas compartilhadas…</string>
-    <string name="setup_manual_share_hint">Nome da pasta compartilhada (ex: backup-500gb)</string>
+    <string name="setup_manual_share_hint">Nome da pasta compartilhada (ex: midia)</string>
     <string name="setup_testing_connection">Testando pasta…</string>
     <string name="setup_share_not_found">Pasta não encontrada ou sem acesso. Confira o nome.</string>
 
