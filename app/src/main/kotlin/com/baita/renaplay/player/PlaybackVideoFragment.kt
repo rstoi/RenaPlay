@@ -393,13 +393,22 @@ class PlaybackVideoFragment : VideoSupportFragment() {
      * serviço HEVC264 da rede local recodifica o vídeo e o app SUBSTITUI o arquivo no share,
      * guardando o original como .hevcbak. Depois disso o RenaPlay reproduz normalmente, com o
      * decoder H.264 do aparelho.
+     *
+     * `allowExceedsCapabilities = true` é essencial: o decoder AVC daqui aceita H.264 High 10
+     * (avc1.6E001E) e o exibe corretamente, mas o ExoPlayer o marca como EXCEEDS_CAPABILITIES —
+     * e a sobrecarga de um argumento de isTrackSupported() só considera FORMAT_HANDLED. Sem esse
+     * flag, um vídeo que toca perfeitamente era dado como indecodificável e o app oferecia
+     * converter à toa. O que interessa aqui é o caso real de tela preta: nenhum decoder para o
+     * codec (UNSUPPORTED_SUBTYPE), quando a faixa sequer é selecionada.
      */
     private fun warnIfVideoUndecodable(tracks: Tracks) {
         if (hasWarnedUndecodableVideo) return
         val videoGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_VIDEO }
         if (videoGroups.isEmpty()) return
         val anySupported = videoGroups.any { group ->
-            (0 until group.length).any { group.isTrackSupported(it) }
+            (0 until group.length).any {
+                group.isTrackSupported(it, /* allowExceedsCapabilities= */ true)
+            }
         }
         if (anySupported) return
 

@@ -16,6 +16,7 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
+import kotlin.math.roundToInt
 
 data class Hevc264Progress(
     val status: String,
@@ -121,12 +122,19 @@ class Hevc264Client(baseUrl: String) {
                 if (payload.isEmpty()) continue
                 val json = runCatching { JSONObject(payload) }.getOrNull() ?: continue
                 val status = json.optString("status", "")
-                val prog = json.optInt("progress", 0)
-                val err = json.optString("error").takeIf { it.isNotBlank() }
-                val done = err != null || prog >= 100 ||
-                    status.equals("done", true) || status.equals("completed", true) ||
-                    status.equals("concluído", true)
-                onProgress(Hevc264Progress(status, prog, json.optString("eta", ""), done, err))
+                // O serviço manda progress como FRAÇÃO (0.0..1.0), não porcentagem — conferido
+                // contra o SSE real: {"status":"running","progress":0.479,"eta":7,...}. Lê-lo com
+                // optInt truncava tudo para 0 e a barra ficava parada o tempo todo.
+                val prog = (json.optDouble("progress", 0.0) * 100).roundToInt().coerceIn(0, 100)
+                // CUIDADO: o serviço manda "error": null e "eta": null em todo evento, e o
+                // optString do Android devolve a STRING "null" para um JSON null (não ""). Ler
+                // com optString fazia o primeiro evento parecer um erro e a conversão abortava
+                // sempre, com a mensagem "Falha na conversão: null". Daí o isNull() explícito.
+                val err = if (json.isNull("error")) null
+                          else json.optString("error").takeIf { it.isNotBlank() }
+                val eta = if (json.isNull("eta")) "" else json.optString("eta")
+                val done = err != null || status.equals("done", true)
+                onProgress(Hevc264Progress(status, prog, eta, done, err))
                 if (done) break
             }
         }
