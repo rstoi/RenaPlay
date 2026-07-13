@@ -7,6 +7,7 @@ import com.baita.renaplay.data.ConversionSettingsStore
 import com.baita.renaplay.data.ServerConfig
 import com.baita.renaplay.player.Hevc264Client
 import com.baita.renaplay.player.Hevc264Discovery
+import com.baita.renaplay.player.Hevc264StalledException
 import com.baita.renaplay.smb.SmbClientProvider
 import com.baita.renaplay.smb.SmbResult
 import kotlinx.coroutines.CoroutineScope
@@ -152,7 +153,10 @@ object ConversionManager {
                 job = job.copy(phase = ConversionPhase.DONE, percent = 100, newPath = finalPath)
                 publish(job)
             } catch (e: Exception) {
-                job = job.copy(phase = ConversionPhase.FAILED, error = e.message ?: "falha")
+                val reason = if (e is Hevc264StalledException)
+                    app.getString(com.baita.renaplay.R.string.convert_error_stalled)
+                else e.message ?: "falha"
+                job = job.copy(phase = ConversionPhase.FAILED, error = reason)
                 publish(job)
             }
         }

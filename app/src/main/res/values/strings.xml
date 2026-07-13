@@ -72,6 +72,7 @@
     <string name="convert_done">Pronto! Reproduzindo a versão em H.264.</string>
     <string name="convert_error">Falha na conversão: %1$s</string>
     <string name="convert_error_no_service">Serviço de conversão HEVC264 não encontrado na rede local.</string>
+    <string name="convert_error_stalled">O servidor de conversão parou de responder. Verifique se o HEVC264 ainda está rodando e tente de novo.</string>
 
     <!-- Player: faixas de áudio/legenda -->
     <string name="track_picker_subtitles_title">Legendas</string>

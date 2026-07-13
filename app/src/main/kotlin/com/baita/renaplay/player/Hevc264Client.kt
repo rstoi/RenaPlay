@@ -68,16 +68,36 @@ object Hevc264Discovery {
     }
 }
 
+/** O servidor abandonou o job: o SSE emudeceu, ou acabou sem nunca dizer "done". */
+class Hevc264StalledException(motivo: String) : IOException(motivo) {
+    companion object {
+        const val MUDO = "o servidor de conversão ficou mudo"
+        const val SEM_DONE = "o stream de progresso acabou sem concluir a conversão"
+    }
+}
+
 /**
  * Cliente HTTP do serviço HEVC264 (upload/progress-SSE/download). Chamadas são
  * bloqueantes — usar em Dispatchers.IO. Timeouts de leitura/escrita zerados para
- * aguentar uploads/downloads grandes e o stream SSE de progresso.
+ * aguentar uploads/downloads grandes; o SSE de progresso é a exceção, ver [streamProgress].
  */
-class Hevc264Client(baseUrl: String) {
+class Hevc264Client(
+    baseUrl: String,
+    progressIdleTimeoutSeconds: Long = PROGRESS_IDLE_TIMEOUT_SECONDS
+) {
     private val base = baseUrl.trimEnd('/')
     private val http: OkHttpClient = HttpClientProvider.client.newBuilder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .writeTimeout(0, TimeUnit.MILLISECONDS)
+        .build()
+
+    // O readTimeout zerado é obrigatório no upload: depois do último byte o serviço ainda leva
+    // minutos para gravar o arquivo antes de responder com o id. No SSE de progresso ele é veneno
+    // — se o job morre do outro lado, a leitura bloqueia para sempre e a conversão fica eterna num
+    // percentual qualquer (já ficou 5h em "24%"), com o foreground service vivo e sem erro nenhum.
+    // Aqui, portanto, o silêncio tem prazo.
+    private val progressHttp: OkHttpClient = http.newBuilder()
+        .readTimeout(progressIdleTimeoutSeconds, TimeUnit.SECONDS)
         .build()
 
     fun health(): Boolean = try {
@@ -171,15 +191,31 @@ class Hevc264Client(baseUrl: String) {
         false
     }
 
-    /** Consome o SSE de /progress/<id>, chamando onProgress a cada evento (bloqueante). */
+    /**
+     * Consome o SSE de /progress/<id>, chamando onProgress a cada evento (bloqueante).
+     *
+     * Lança [Hevc264StalledException] nos dois jeitos que o servidor tem de sumir: ficar mudo além
+     * do prazo, ou encerrar o stream sem nunca mandar "done". Um stream que acaba no meio NÃO é
+     * sucesso — sem isso, quem chama seguia para o download de um arquivo que não existe.
+     */
     fun streamProgress(id: String, onProgress: (Hevc264Progress) -> Unit) {
         val req = Request.Builder().url("$base/progress/$id").get()
             .header("Accept", "text/event-stream").build()
-        http.newCall(req).execute().use { r ->
+        val call = try {
+            progressHttp.newCall(req).execute()
+        } catch (e: SocketTimeoutException) {
+            throw Hevc264StalledException(Hevc264StalledException.MUDO)
+        }
+        call.use { r ->
             if (!r.isSuccessful) throw IOException("progress HTTP ${r.code}")
             val source = r.body?.source() ?: throw IOException("sem corpo em /progress")
-            while (true) {
-                val line = source.readUtf8Line() ?: break
+            var finished = false
+            while (!finished) {
+                val line = try {
+                    source.readUtf8Line() ?: break
+                } catch (e: SocketTimeoutException) {
+                    throw Hevc264StalledException(Hevc264StalledException.MUDO)
+                }
                 if (!line.startsWith("data:")) continue
                 val payload = line.substringAfter("data:").trim()
                 if (payload.isEmpty()) continue
@@ -198,8 +234,9 @@ class Hevc264Client(baseUrl: String) {
                 val eta = if (json.isNull("eta")) "" else json.optString("eta")
                 val done = err != null || status.equals("done", true)
                 onProgress(Hevc264Progress(status, prog, eta, done, err))
-                if (done) break
+                if (done) finished = true
             }
+            if (!finished) throw Hevc264StalledException(Hevc264StalledException.SEM_DONE)
         }
     }
 
@@ -218,6 +255,15 @@ class Hevc264Client(baseUrl: String) {
                          else body.byteStream()
             writeTo(stream)
         }
+    }
+
+    companion object {
+        /**
+         * Silêncio tolerado no SSE antes de dar o job por perdido. Generoso de propósito: o serviço
+         * manda evento a cada poucos segundos enquanto o ffmpeg roda, então três minutos calados
+         * significam servidor morto, não conversão lenta.
+         */
+        const val PROGRESS_IDLE_TIMEOUT_SECONDS = 180L
     }
 }
 
