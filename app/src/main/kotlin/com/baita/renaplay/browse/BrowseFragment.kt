@@ -28,6 +28,7 @@ import com.baita.renaplay.data.ServerConfigStore
 import com.baita.renaplay.data.SucaAuthStore
 import com.baita.renaplay.data.SucaSession
 import com.baita.renaplay.data.WatchProgressStore
+import com.baita.renaplay.pairing.PairingActivity
 import com.baita.renaplay.detail.DetailActivity
 import com.baita.renaplay.player.PlaybackActivity
 import com.baita.renaplay.setup.ServerSetupActivity
@@ -233,6 +234,8 @@ class BrowseFragment : BrowseSupportFragment() {
             rowsAdapter.add(ListRow(HeaderItem(getString(titleRes)), itemsAdapter))
         }
 
+        rowsAdapter.add(settingsRow())
+
         adapter = rowsAdapter
         loadCloudLibrary(rowsAdapter)
         updateStatus()
@@ -383,8 +386,27 @@ class BrowseFragment : BrowseSupportFragment() {
         startActivity(intent)
     }
 
+    /**
+     * Linha "Configurações" no menu vertical. É o único caminho de teclado para o pareamento: o
+     * status no canto superior direito também abre os ajustes, mas o D-pad não chega nele — de
+     * "Filmes" para cima o foco não sai do menu, e num Fire TV sem toque isso deixava o pareamento
+     * com o Suca Media inalcançável num aparelho novo.
+     */
+    private fun settingsRow(): ListRow {
+        val paired = SucaAuthStore.load(requireContext()) != null
+        val actions = ArrayObjectAdapter(SettingsActionPresenter()).apply {
+            add(SettingsAction(
+                SettingsActionIds.SUCA_PAIRING,
+                getString(if (paired) R.string.browse_suca_connected else R.string.settings_suca_pairing)
+            ))
+            add(SettingsAction(SettingsActionIds.OPEN_SETTINGS, getString(R.string.browse_open_settings)))
+        }
+        return ListRow(HeaderItem(getString(R.string.row_settings)), actions)
+    }
+
     private fun handleSettingsAction(action: SettingsAction) {
         when (action.id) {
+            SettingsActionIds.SUCA_PAIRING -> startActivity(Intent(requireContext(), PairingActivity::class.java))
             SettingsActionIds.OPEN_SETTINGS -> startActivity(Intent(requireContext(), SettingsActivity::class.java))
             SettingsActionIds.CHANGE_SERVER -> {
                 ServerConfigStore.clear(requireContext())
