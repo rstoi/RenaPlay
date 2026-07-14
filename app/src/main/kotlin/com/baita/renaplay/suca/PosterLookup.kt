@@ -25,7 +25,12 @@ object PosterLookup {
             (result as? SucaResult.Success)?.value?.let { selectBestMatch(it, kind, title) }
         }.getOrNull()
         val resolved = CachedPoster(tmdbId = found?.id, posterUrl = found?.posterUrl)
-        PosterCacheStore.put(context, cacheKey, resolved.tmdbId, resolved.posterUrl)
+        // Só guarda ACERTO. Guardar o "não achei" congelava o filme sem pôster para sempre: bastava
+        // uma busca falhar uma vez — rede fora, título ainda sujo, TMDB de mau humor — e o app nunca
+        // mais perguntava. Foi o que aconteceu com The Arctic Convoy.
+        if (resolved.posterUrl != null || resolved.tmdbId != null) {
+            PosterCacheStore.put(context, cacheKey, resolved.tmdbId, resolved.posterUrl)
+        }
         return resolved
     }
 

@@ -41,7 +41,9 @@ private const val MAX_SMB_READ = 65_536
 // (tamanho do bloco / latência do round-trip), sem relação com a banda disponível. Emular o
 // pipeline aqui — N handles independentes na MESMA sessão SMB2, cada um buscando um bloco
 // diferente — multiplica o throughput pelo mesmo fator, sem depender de banda extra.
-private const val PIPELINE_DEPTH = 12
+// 8 chunks de 512KB = 4MB em voo. Com 12 eram 6MB só aqui, e num aparelho de 922MB cada megabyte
+// conta: quem paga a conta da memória é o processo do player, que o sistema mata em primeiro plano.
+private const val PIPELINE_DEPTH = 8
 
 private class Chunk(val data: ByteArray, val length: Int)
 
@@ -50,6 +52,11 @@ fun smbPathToUri(path: String): Uri = Uri.Builder().scheme(SMB_URI_SCHEME).path(
 class SmbDataSource(private val config: ServerConfig) : BaseDataSource(true) {
 
     private var uri: Uri? = null
+    // O ExoPlayer fecha data sources que nunca chegou a abrir — num seek, ao trocar de mídia, ou
+    // quando o open() falha. Chamar transferEnded() nesses casos estoura NullPointerException lá
+    // dentro do DefaultBandwidthMeter (ele vai buscar um dataSpec que não existe), e o player trata
+    // isso como "Source error" e INTERROMPE o filme. Era esta a interrupção sem explicação.
+    private var transferindo = false
     private var bytesRemaining: Long = 0
 
     // Reaproveita a sessão autenticada entre reaberturas desta mesma instância (comum durante a
@@ -104,6 +111,7 @@ class SmbDataSource(private val config: ServerConfig) : BaseDataSource(true) {
         repeat(PIPELINE_DEPTH) { scheduleNextChunk() }
 
         transferStarted(dataSpec)
+        transferindo = true
         return bytesRemaining
     }
 
@@ -206,7 +214,10 @@ class SmbDataSource(private val config: ServerConfig) : BaseDataSource(true) {
         try {
             releaseResources()
         } finally {
-            transferEnded()
+            if (transferindo) {
+                transferindo = false
+                transferEnded()
+            }
         }
     }
 

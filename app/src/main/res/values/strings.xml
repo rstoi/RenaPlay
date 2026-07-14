@@ -40,6 +40,10 @@
 
     <!-- Detail -->
     <string name="action_play">Assistir</string>
+    <string name="resume_title">Continuar de onde parou?</string>
+    <string name="resume_message">Você parou em %1$s.</string>
+    <string name="resume_continue">Continuar</string>
+    <string name="resume_restart">Começar do início</string>
     <string name="action_subtitles">Legendas</string>
     <string name="action_convert">Converter para H.264</string>
     <string name="action_change_server">Trocar servidor</string>

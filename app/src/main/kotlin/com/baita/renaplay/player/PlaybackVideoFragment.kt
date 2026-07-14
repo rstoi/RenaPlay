@@ -51,6 +51,9 @@ private val SUBTITLE_EXTENSIONS = setOf("srt", "vtt", "ass", "ssa", "sub")
 
 private enum class TrackPickerType { SUBTITLE, AUDIO }
 
+private const val SALTO_MS = 10_000L
+private const val SALTO_LONGO_MS = 60_000L
+
 class PlaybackVideoFragment : VideoSupportFragment() {
 
     private var player: ExoPlayer? = null
@@ -100,20 +103,26 @@ class PlaybackVideoFragment : VideoSupportFragment() {
                 DefaultMediaSourceFactory(requireContext())
                     .setDataSourceFactory(CompositeDataSourceFactory(requireContext(), config))
             )
-            // Buffers maiores que o padrão do ExoPlayer: streaming via SMB tem latência mais
-            // variável que HTTP/CDN, então um buffer grande absorve esses picos sem re-bufferizar
-            // no meio do vídeo. Mesma ideia do cache de read-ahead do Kodi (advancedsettings
-            // memorysize/readfactor): com o pipeline paralelo de [SmbDataSource] o throughput medido
-            // (~1,8 MB/s) é várias vezes o bitrate típico dos arquivos, então dá pra encher um
-            // buffer grande rápido e ficar com folga.
+            // Buffer generoso em TEMPO, mas com teto em BYTES — e o teto é o que manda.
+            //
+            // Antes eram 300s de vídeo sem limite de tamanho: num filme de 5 Mbps isso são ~190MB
+            // de buffer, e este Fire TV tem 922MB de RAM no total. O resultado não era rebuffer nem
+            // travada: era o sistema MATANDO o app em primeiro plano, no meio do filme
+            // (am_low_memory seguido de am_proc_died com adj=0). O vídeo simplesmente sumia e voltava
+            // para a grade.
+            //
+            // 24MB absorvem ~40s de um filme de 5 Mbps — folga de sobra para os picos de latência do
+            // SMB, que é o que o buffer grande existia para cobrir, sem torrar a memória do aparelho.
             .setLoadControl(
                 DefaultLoadControl.Builder()
                     .setBufferDurationsMs(
-                        60_000, // mín. antes de arriscar rebuffer
-                        300_000, // máx. mantido em buffer
+                        20_000, // mín. antes de arriscar rebuffer
+                        60_000, // máx. mantido em buffer (o teto em bytes corta antes, num filme pesado)
                         1_500, // mín. pra iniciar playback (não atrasa o primeiro frame)
                         5_000 // mín. pra retomar após rebuffer
                     )
+                    .setTargetBufferBytes(24 * 1024 * 1024)
+                    .setPrioritizeTimeOverSizeThresholds(false)
                     .build()
             )
             .build()
@@ -135,7 +144,7 @@ class PlaybackVideoFragment : VideoSupportFragment() {
                     hasAppliedResume = true
                     val resumeMs = WatchProgressStore.lastPosition(requireContext(), videoPath)
                     if (resumeMs > 5_000L && resumeMs < exoPlayer.duration - 5_000L) {
-                        exoPlayer.seekTo(resumeMs)
+                        perguntarRetomada(exoPlayer, resumeMs)
                     }
                 }
             }
@@ -248,6 +257,60 @@ class PlaybackVideoFragment : VideoSupportFragment() {
         videoPath = convertido
         exo.setMediaItem(MediaItem.Builder().setUri(smbPathToUri(convertido)).build())
         exo.prepare()
+    }
+
+    /**
+     * Retomar de onde parou é o que quase sempre se quer — mas nem sempre. Antes, o player pulava
+     * sozinho para o meio do filme e não havia como recomeçar do início sem procurar a barra e
+     * arrastar até o zero (o que também não funcionava, porque não havia como arrastar).
+     */
+    private fun perguntarRetomada(exoPlayer: ExoPlayer, resumeMs: Long) {
+        val minutos = resumeMs / 60_000
+        val segundos = (resumeMs % 60_000) / 1000
+        val quando = String.format(java.util.Locale("pt", "BR"), "%d:%02d", minutos, segundos)
+        exoPlayer.pause()
+        android.app.AlertDialog.Builder(requireContext())
+            .setTitle(getString(R.string.resume_title))
+            .setMessage(getString(R.string.resume_message, quando))
+            .setPositiveButton(getString(R.string.resume_continue)) { _, _ ->
+                exoPlayer.seekTo(resumeMs)
+                exoPlayer.play()
+            }
+            .setNegativeButton(getString(R.string.resume_restart)) { _, _ ->
+                exoPlayer.seekTo(0)
+                exoPlayer.play()
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    /**
+     * Avanço e retrocesso pelo controle. O glue do Leanback só dá seek pela barra de progresso, e a
+     * barra só aparece com o overlay aberto — sem isto, o controle remoto simplesmente não avançava
+     * o filme. Com o overlay fechado, esquerda/direita saltam; segurar acelera o salto.
+     */
+    fun onKey(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        val exoPlayer = player ?: return false
+        if (event.action != android.view.KeyEvent.ACTION_DOWN) return false
+        android.util.Log.i("RenaPlayKeys", "tecla=$keyCode overlay=$isControlsOverlayVisible pos=${exoPlayer.currentPosition}")
+        val salto = if (event.repeatCount > 2) SALTO_LONGO_MS else SALTO_MS
+        return when (keyCode) {
+            android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { saltar(exoPlayer, salto); true }
+            android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> { saltar(exoPlayer, -salto); true }
+            android.view.KeyEvent.KEYCODE_DPAD_RIGHT ->
+                if (!isControlsOverlayVisible) { saltar(exoPlayer, salto); true } else false
+            android.view.KeyEvent.KEYCODE_DPAD_LEFT ->
+                if (!isControlsOverlayVisible) { saltar(exoPlayer, -salto); true } else false
+            else -> false
+        }
+    }
+
+    private fun saltar(exoPlayer: ExoPlayer, deltaMs: Long) {
+        val alvo = (exoPlayer.currentPosition + deltaMs)
+            .coerceIn(0L, (exoPlayer.duration - 1000L).coerceAtLeast(0L))
+        android.util.Log.i("RenaPlayKeys", "saltando de ${exoPlayer.currentPosition} para $alvo (dur=${exoPlayer.duration})")
+        exoPlayer.seekTo(alvo)
+        if (!exoPlayer.isPlaying) exoPlayer.play()
     }
 
     private suspend fun resolveSubtitleConfig(
