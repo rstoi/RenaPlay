@@ -1,6 +1,7 @@
 package com.baita.renaplay.conversion
 
 import android.content.Context
+import android.util.Log
 import android.content.Intent
 import androidx.core.content.ContextCompat
 import com.baita.renaplay.data.ConversionSettingsStore
@@ -18,6 +19,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.IOException
+
+private const val TAG = "RenaPlayConv"
 
 enum class ConversionPhase { DISCOVERING, UPLOADING, PROCESSING, CONVERTING, DOWNLOADING, SAVING, DONE, FAILED }
 
@@ -86,13 +89,16 @@ object ConversionManager {
 
         scope.launch {
             fun phase(p: ConversionPhase, percent: Int = 0) {
+                if (p != job.phase) Log.i(TAG, "fase=$p arquivo=$path")
                 job = job.copy(phase = p, percent = percent)
                 publish(job)
             }
             try {
                 val smb = SmbClientProvider.instance
-                val baseUrl = Hevc264Discovery.discover()
+                val baseUrl = ConversionSettingsStore.getExplicitServiceUrl(app)
+                    ?: Hevc264Discovery.discover()
                     ?: ConversionSettingsStore.getServiceUrl(app)
+                Log.i(TAG, "serviço=$baseUrl")
                 val client = Hevc264Client(baseUrl)
                 if (baseUrl.isBlank() || !client.health()) {
                     throw IOException(app.getString(com.baita.renaplay.R.string.convert_error_no_service))
@@ -153,6 +159,10 @@ object ConversionManager {
                 job = job.copy(phase = ConversionPhase.DONE, percent = 100, newPath = finalPath)
                 publish(job)
             } catch (e: Exception) {
+                // Sem isto, uma conversão que falha no meio de um filme de 1,3 GB some sem deixar
+                // rastro: o app só mostra um toast, e quando o Fire TV recicla o processo (este tem
+                // 1 GB de RAM) nem o toast sobra para dizer o que houve.
+                Log.e(TAG, "conversão falhou em ${job.phase} (${path})", e)
                 val reason = if (e is Hevc264StalledException)
                     app.getString(com.baita.renaplay.R.string.convert_error_stalled)
                 else e.message ?: "falha"

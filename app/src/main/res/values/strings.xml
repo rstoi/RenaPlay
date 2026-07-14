@@ -41,6 +41,7 @@
     <!-- Detail -->
     <string name="action_play">Assistir</string>
     <string name="action_subtitles">Legendas</string>
+    <string name="action_convert">Converter para H.264</string>
     <string name="action_change_server">Trocar servidor</string>
     <string name="action_view_episodes">Ver episódios</string>
 

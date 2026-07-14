@@ -20,6 +20,17 @@ object ConversionSettingsStore {
     /** Vazio quando não configurado — a descoberta UDP é quem acha o serviço. */
     val DEFAULT_SERVICE_URL: String = BuildConfig.SEED_CONVERT_URL.trim().trimEnd('/')
 
+    /**
+     * URL que o usuário escolheu a dedo, ou null. Tem precedência sobre a descoberta: quando
+     * alguém aponta o app para um serviço específico, é nele que se quer converter — a descoberta
+     * responde quem gritar mais rápido na rede, e com dois serviços no ar isso vira sorteio.
+     */
+    fun getExplicitServiceUrl(context: Context): String? =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_SERVICE_URL, null)
+            ?.trim()?.trimEnd('/')
+            ?.takeIf { it.isNotBlank() }
+
     fun getServiceUrl(context: Context): String {
         val url = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_SERVICE_URL, DEFAULT_SERVICE_URL)

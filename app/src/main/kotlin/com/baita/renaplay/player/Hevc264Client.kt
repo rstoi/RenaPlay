@@ -100,6 +100,13 @@ class Hevc264Client(
         .readTimeout(progressIdleTimeoutSeconds, TimeUnit.SECONDS)
         .build()
 
+    // Sem isto o OkHttp, ao ver a conexão morrer no fim do envio, REENVIA o filme inteiro sozinho —
+    // mais 1,3GB e mais um job no servidor, convertendo o mesmo arquivo em duplicata. Aqui o retry
+    // é sempre errado: quem recupera o upload perdido é a adoção do job em [jobRecemCriado].
+    private val uploadHttp: OkHttpClient = http.newBuilder()
+        .retryOnConnectionFailure(false)
+        .build()
+
     fun health(): Boolean = try {
         val req = Request.Builder().url("$base/health").get().build()
         http.newCall(req).execute().use { r ->
@@ -123,6 +130,10 @@ class Hevc264Client(
         onProgress: (Int) -> Unit = {},
         openStream: () -> InputStream
     ): String {
+        // Se o serviço JÁ tem este arquivo convertido, não faz sentido reenviá-lo: são 20 minutos
+        // de upload e horas de recodificação para chegar ao mesmo arquivo que já está lá. Casa por
+        // nome E tamanho para não pegar carona num homônimo de conteúdo diferente.
+        jobConcluido(filename, contentLength)?.let { return it }
         val fileBody = object : RequestBody() {
             override fun contentType() = "video/octet-stream".toMediaTypeOrNull()
             override fun contentLength() = contentLength
@@ -158,10 +169,24 @@ class Hevc264Client(
         if (supportsRawUpload()) {
             val name = URLEncoder.encode(filename, "UTF-8")
             val rawReq = Request.Builder().url("$base/upload_raw?name=$name").post(fileBody).build()
-            http.newCall(rawReq).execute().use { r ->
-                val text = r.body?.string().orEmpty()
-                if (!r.isSuccessful) throw IOException("upload HTTP ${r.code}")
-                return JSONObject(text).getString("id")
+            try {
+                uploadHttp.newCall(rawReq).execute().use { r ->
+                    val text = r.body?.string().orEmpty()
+                    if (!r.isSuccessful) throw IOException("upload HTTP ${r.code}")
+                    return JSONObject(text).getString("id")
+                }
+            } catch (e: IOException) {
+                // O último byte enviado não é o fim da história: o waitress só entrega o corpo ao
+                // serviço DEPOIS de bufferizá-lo inteiro, e o serviço então copia os 1,3GB de novo
+                // para a pasta de trabalho. São minutos de silêncio na conexão — e num filme foi
+                // nesse silêncio que o socket do Fire TV morreu, jogando fora 20 minutos de envio
+                // de um arquivo que o servidor já tinha recebido e começado a converter.
+                //
+                // Antes de dar o upload por perdido, pergunta ao serviço se o job existe: se o
+                // arquivo chegou lá, ele é adotado e a conversão segue de onde estava.
+                val adotado = jobRecemCriado(filename)
+                    ?: throw e
+                return adotado
             }
         }
 
@@ -174,6 +199,38 @@ class Hevc264Client(
             if (!r.isSuccessful) throw IOException("upload HTTP ${r.code}")
             return JSONObject(text).getString("id")
         }
+    }
+
+    /** Job já concluído para este mesmo arquivo (nome + tamanho): dá para pular o upload inteiro. */
+    private fun jobConcluido(filename: String, contentLength: Long): String? =
+        buscaJob(filename) { it.optString("status") == "done" && it.optLong("size", -1) == contentLength }
+
+    /**
+     * Procura no serviço um job recém-criado para [filename] — o upload que "falhou" mas chegou.
+     * Só considera jobs jovens (2 min) para não adotar a conversão de uma tentativa antiga.
+     */
+    private fun jobRecemCriado(filename: String): String? =
+        buscaJob(filename) {
+            it.optString("status") != "error" &&
+                it.optInt("idade_s", Int.MAX_VALUE) < ADOPTION_MAX_AGE_SECONDS
+        }
+
+    /** Consulta /jobs e devolve o id do job MAIS NOVO que casa com [filename] e [aceita]. */
+    private fun buscaJob(filename: String, aceita: (JSONObject) -> Boolean): String? = try {
+        val req = Request.Builder().url("$base/jobs").get().build()
+        http.newCall(req).execute().use { r ->
+            if (!r.isSuccessful) null
+            else {
+                val jobs = JSONObject(r.body?.string().orEmpty()).getJSONArray("jobs")
+                (0 until jobs.length()).map { jobs.getJSONObject(it) }
+                    .filter { it.optString("name") == filename && aceita(it) }
+                    .minByOrNull { it.optInt("idade_s", Int.MAX_VALUE) }
+                    ?.optString("id")
+                    ?.takeIf { it.isNotBlank() }
+            }
+        }
+    } catch (e: Exception) {
+        null
     }
 
     /**
@@ -264,6 +321,9 @@ class Hevc264Client(
          * significam servidor morto, não conversão lenta.
          */
         const val PROGRESS_IDLE_TIMEOUT_SECONDS = 180L
+
+        /** Idade máxima de um job para ser adotado como sendo o desta tentativa de upload. */
+        private const val ADOPTION_MAX_AGE_SECONDS = 900
     }
 }
 

@@ -26,6 +26,7 @@ import com.baita.renaplay.data.PosterCacheStore
 import com.baita.renaplay.data.ServerConfig
 import com.baita.renaplay.data.ServerConfigStore
 import com.baita.renaplay.data.SucaAuthStore
+import com.baita.renaplay.conversion.ConversionManager
 import com.baita.renaplay.player.PlaybackActivity
 import com.baita.renaplay.subtitles.SubtitleSearchActivity
 import com.baita.renaplay.suca.PosterLookup
@@ -39,6 +40,7 @@ import kotlinx.coroutines.withContext
 private const val ACTION_PLAY = 1L
 private const val ACTION_SUBTITLES = 2L
 private const val ACTION_VIEW_EPISODES = 3L
+private const val ACTION_CONVERT = 4L
 
 class DetailFragment : DetailsSupportFragment() {
 
@@ -94,6 +96,7 @@ class DetailFragment : DetailsSupportFragment() {
                 ACTION_PLAY -> playItem(item)
                 ACTION_SUBTITLES -> openSubtitleSearch(item)
                 ACTION_VIEW_EPISODES -> openEpisodes(item)
+                ACTION_CONVERT -> convertItem(item)
             }
         }
         return presenter
@@ -107,6 +110,7 @@ class DetailFragment : DetailsSupportFragment() {
         if (item.kind == MediaKind.MOVIE) {
             actions.add(Action(ACTION_PLAY, getString(R.string.action_play)))
             actions.add(Action(ACTION_SUBTITLES, getString(R.string.action_subtitles)))
+            actions.add(Action(ACTION_CONVERT, getString(R.string.action_convert)))
         } else {
             actions.add(Action(ACTION_VIEW_EPISODES, getString(R.string.action_view_episodes)))
         }
@@ -199,6 +203,20 @@ class DetailFragment : DetailsSupportFragment() {
             }
         }
         startActivity(intent)
+    }
+
+    /**
+     * Converte para H.264 8-bit sob demanda, sem esperar o player descobrir que não decodifica.
+     * Existe por dois motivos: nem todo Fire TV falha nos mesmos arquivos (o stick novo decodifica
+     * HEVC 10-bit que o antigo não toca, e é o antigo que precisa do arquivo convertido), e a
+     * conversão não tinha como ser disparada — nem acompanhada — de propósito.
+     *
+     * Abre o player em seguida porque é ele quem mostra o progresso do job corrente.
+     */
+    private fun convertItem(target: MediaItem) {
+        val config = ServerConfigStore.load(requireContext()) ?: return
+        ConversionManager.start(requireContext(), config, target.path, target.title)
+        playItem(target)
     }
 
     private fun openSubtitleSearch(target: MediaItem) {
