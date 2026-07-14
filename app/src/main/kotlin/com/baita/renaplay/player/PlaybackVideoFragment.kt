@@ -69,6 +69,7 @@ class PlaybackVideoFragment : VideoSupportFragment() {
     private var hasAppliedResume = false
     private var hasSentPlayEvent = false
     private var hasWarnedUndecodableVideo = false
+    private var jaLogouLegenda = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -136,6 +137,10 @@ class PlaybackVideoFragment : VideoSupportFragment() {
             }
 
             override fun onCues(cueGroup: CueGroup) {
+                if (cueGroup.cues.isNotEmpty() && !jaLogouLegenda) {
+                    jaLogouLegenda = true
+                    android.util.Log.i("RenaPlaySub", "legenda aparecendo na tela: ${cueGroup.cues.first().text}")
+                }
                 subtitleView.setCues(cueGroup.cues)
             }
 
@@ -350,6 +355,7 @@ class PlaybackVideoFragment : VideoSupportFragment() {
                     .maxByOrNull { it.second }
                     ?.first
                 match?.let { entry ->
+                    android.util.Log.i("RenaPlaySub", "legenda automática: ${entry.name}")
                     readSmbBytes(config, entry.path)?.let { bytes -> buildSubtitleConfigFromBytes(bytes, entry.path) }
                 }
             } else {
