@@ -89,4 +89,12 @@ class TitleCleanerTest {
             TitleCleaner.clean("The.Arctic.Convoy.AKA.Konvoi.2023.NOR.1080p.Blu-ray.AV1.OPUS.5.1-heTOrico.mkv")
         )
     }
+
+    @Test
+    fun `codec grudado no numero de canais nao vira parte do titulo`() {
+        assertEquals(
+            "Passenger (2026)",
+            TitleCleaner.clean("Passenger.2026.1080p.WEBRip.x264.AAC5.1-[YTS.GG - YTS.BZ].mp4")
+        )
+    }
 }

@@ -293,6 +293,20 @@ class BrowseFragment : BrowseSupportFragment() {
         rowsAdapter.add(ListRow(HeaderItem(getString(R.string.row_continue_watching)), continueAdapter))
     }
 
+    /**
+     * Título do TMDB quando ele existe — é o que está escrito no pôster. Episódio mantém o próprio
+     * nome (o TMDB devolveria o nome da SÉRIE, e a linha viraria uma coluna de títulos repetidos).
+     */
+    private fun tituloExibido(media: MediaItem, tmdb: String?): String {
+        if (media.kind == MediaKind.SERIES && media.path.contains('/')) return media.title
+        val novo = tmdb?.takeIf { it.isNotBlank() } ?: return media.title
+        // O ano vem do arquivo e não vem do TMDB — sem reanexá-lo, "Antes do Pôr do Sol (2004)"
+        // viraria só "Antes do Pôr do Sol", e a grade perderia a única pista de qual é qual numa
+        // franquia.
+        val ano = Regex("\\((19\\d{2}|20\\d{2})\\)\\s*$").find(media.title)?.value?.trim()
+        return if (ano != null && !novo.contains(ano)) "$novo $ano" else novo
+    }
+
     /** Mesmo arquivo depois da conversão: só muda a extensão ("filme.mkv" -> "filme.mp4"). */
     private fun mesmaObra(a: String, b: String): Boolean =
         a.substringBeforeLast('.') == b.substringBeforeLast('.')
@@ -349,11 +363,37 @@ class BrowseFragment : BrowseSupportFragment() {
                     }
 
                     if (match?.posterUrl != null) {
-                        itemsAdapter.replace(index, media.copy(remotePosterUrl = match.posterUrl, tmdbId = match.tmdbId))
+                        // O título vem junto com o pôster: é o nome que está impresso na arte.
+                        itemsAdapter.replace(
+                            index,
+                            media.copy(
+                                title = tituloExibido(media, match.titulo),
+                                remotePosterUrl = match.posterUrl,
+                                tmdbId = match.tmdbId
+                            )
+                        )
                     }
                 }
             }
+            gravarBibliotecaEnriquecida(context)
         }
+    }
+
+    /**
+     * Salva no cache a biblioteca COM os títulos do TMDB. Sem isto, o cache guarda o nome do arquivo
+     * ("Before Midnight") enquanto a tela mostra o do TMDB ("Antes da Meia-Noite") — e quem lê o
+     * cache, como a tela de detalhe, não reconhece que "Antes do Amanhecer" e "Antes da Meia-Noite"
+     * são o mesmo filme em três partes: para ela, um se chama "Antes" e o outro "Before".
+     */
+    private fun gravarBibliotecaEnriquecida(context: android.content.Context) {
+        val config = ServerConfigStore.load(context) ?: return
+        val atuais = itemAdapters
+            .flatMap { adapter -> (0 until adapter.size()).mapNotNull { adapter.get(it) as? MediaItem } }
+            .filterNot { it.id.startsWith(CONTINUE_WATCHING_ID_PREFIX) }
+            .distinctBy { it.path }
+        if (atuais.isEmpty()) return
+        localItems = atuais
+        LibraryCacheStore.save(context, config, atuais)
     }
 
     /**

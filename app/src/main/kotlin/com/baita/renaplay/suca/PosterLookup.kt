@@ -24,12 +24,16 @@ object PosterLookup {
             val result = SucaApiClient(context).search(session, TitleCleaner.searchQuery(title))
             (result as? SucaResult.Success)?.value?.let { selectBestMatch(it, kind, title) }
         }.getOrNull()
-        val resolved = CachedPoster(tmdbId = found?.id, posterUrl = found?.posterUrl)
+        // Guarda também o título do TMDB (em português): a arte do pôster traz o nome traduzido
+        // ("Antes da Meia-Noite"), e o card exibia o nome do arquivo em inglês ("Before Midnight").
+        // Card e pôster diziam coisas diferentes sobre o mesmo filme, e a biblioteca parecia errada.
+        val resolved = CachedPoster(
+            tmdbId = found?.id, posterUrl = found?.posterUrl, titulo = found?.title?.takeIf { it.isNotBlank() })
         // Só guarda ACERTO. Guardar o "não achei" congelava o filme sem pôster para sempre: bastava
         // uma busca falhar uma vez — rede fora, título ainda sujo, TMDB de mau humor — e o app nunca
         // mais perguntava. Foi o que aconteceu com The Arctic Convoy.
         if (resolved.posterUrl != null || resolved.tmdbId != null) {
-            PosterCacheStore.put(context, cacheKey, resolved.tmdbId, resolved.posterUrl)
+            PosterCacheStore.put(context, cacheKey, resolved.tmdbId, resolved.posterUrl, resolved.titulo)
         }
         return resolved
     }

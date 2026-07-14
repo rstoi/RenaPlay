@@ -10,6 +10,7 @@ import androidx.leanback.app.BackgroundManager
 import androidx.leanback.app.DetailsSupportFragment
 import androidx.leanback.widget.Action
 import androidx.leanback.widget.ArrayObjectAdapter
+import androidx.leanback.widget.HeaderItem
 import androidx.leanback.widget.ClassPresenterSelector
 import androidx.leanback.widget.DetailsOverviewRow
 import androidx.leanback.widget.FullWidthDetailsOverviewRowPresenter
@@ -18,12 +19,15 @@ import androidx.leanback.widget.ListRowPresenter
 import androidx.leanback.widget.OnActionClickedListener
 import androidx.lifecycle.lifecycleScope
 import com.baita.renaplay.R
+import com.baita.renaplay.browse.CardPresenter
+import com.baita.renaplay.browse.Colecoes
 import com.baita.renaplay.browse.MediaItem
 import com.baita.renaplay.browse.MediaKind
 import com.baita.renaplay.browse.TitleCleaner
 import com.baita.renaplay.browse.toTmdbMediaType
 import com.baita.renaplay.data.PosterCacheStore
 import com.baita.renaplay.data.ServerConfig
+import com.baita.renaplay.data.LibraryCacheStore
 import com.baita.renaplay.data.ServerConfigStore
 import com.baita.renaplay.data.SucaAuthStore
 import com.baita.renaplay.conversion.ConversionManager
@@ -79,6 +83,7 @@ class DetailFragment : DetailsSupportFragment() {
         })
         buildOverviewRow()
         adapter = rowsAdapter
+        mostrarColecao()
 
         BackgroundManager.getInstance(requireActivity()).apply {
             if (!isAttached) attach(requireActivity().window)
@@ -100,6 +105,27 @@ class DetailFragment : DetailsSupportFragment() {
             }
         }
         return presenter
+    }
+
+    /**
+     * "Antes do Amanhecer", "Antes do Pôr do Sol" e "Antes da Meia-Noite" são um filme em três
+     * partes, e a biblioteca os mostrava como três estranhos em ordem alfabética. Aqui a coleção
+     * aparece inteira, em ordem de lançamento, com o filme atual marcado — e dá para pular direto
+     * para a próxima parte.
+     */
+    private fun mostrarColecao() {
+        if (item.kind != MediaKind.MOVIE) { android.util.Log.i("RenaPlayCol", "não é filme"); return }
+        val config = ServerConfigStore.load(requireContext()) ?: run { android.util.Log.i("RenaPlayCol", "sem config"); return }
+        val biblioteca = LibraryCacheStore.load(requireContext(), config) ?: run { android.util.Log.i("RenaPlayCol", "sem cache"); return }
+        android.util.Log.i("RenaPlayCol", "biblioteca=${biblioteca.size} item='${item.title}' path='${item.path}'")
+        android.util.Log.i("RenaPlayCol", "coleções=" + Colecoes.agrupar(biblioteca).joinToString { "${it.nome}(${it.total})" })
+        val colecao = Colecoes.colecaoDe(item, biblioteca) ?: run { android.util.Log.i("RenaPlayCol", "sem coleção para este filme"); return }
+
+        val cards = ArrayObjectAdapter(CardPresenter())
+        cards.addAll(0, colecao.filmes)
+        val posicao = colecao.posicaoDe(item)
+        val titulo = getString(R.string.collection_row, colecao.nome, posicao, colecao.total)
+        rowsAdapter.add(ListRow(HeaderItem(titulo), cards))
     }
 
     private fun buildOverviewRow() {

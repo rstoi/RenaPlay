@@ -38,6 +38,12 @@ object TitleCleaner {
         "\\b(" + TAGS.sortedByDescending { it.length }.joinToString("|") { Regex.escape(it) } + ")\\b",
         java.util.regex.Pattern.CASE_INSENSITIVE or java.util.regex.Pattern.UNICODE_CASE
     ).toRegex()
+    // "AAC5.1", "DDP5.1", "DTS7.1": o codec vem grudado no número de canais e a lista de tags, que
+    // casa palavra inteira, não pega "AAC5". Sobrava "Passenger AAC5 1" como título — e o TMDB,
+    // claro, nunca achou esse filme.
+    private val AUDIO_COM_CANAIS = Regex(
+        "(?i)\\b(aac|ddp|dd|dts|eac3|ac3|truehd|atmos|opus|flac)\\s*\\d?(\\s+\\d)?\\b"
+    )
     private val YEAR_PATTERN = Regex("\\b(19\\d{2}|20\\d{2})\\b")
     private val OPEN_YEAR_RANGE = Regex("\\(\\s*(19\\d{2}|20\\d{2})\\s*-?\\s*\\)")
     private val SEASON_RANGE = Regex("(?i)\\bS\\d{1,2}\\s*-\\s*S?\\d{1,2}\\b")
@@ -74,6 +80,7 @@ object TitleCleaner {
         s = SEASON_RANGE.replace(s, " ")
         s = BRACKET_GROUP.replace(s, " ")
         s = TAG_PATTERN.replace(s, " ")
+        s = AUDIO_COM_CANAIS.replace(s, " ")
         s = TRAILING_GROUP_TAG.replace(s, "")
         // Remove o ano já capturado para reanexar de forma consistente no final.
         if (year != null) {
