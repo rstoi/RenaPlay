@@ -34,6 +34,8 @@
     <string name="row_other">Outros</string>
     <string name="row_settings">Configurações</string>
     <string name="collection_row">%1$s · parte %2$d de %3$d</string>
+    <string name="collection_missing">%1$s (você não tem)</string>
+    <string name="collection_missing_toast">Este filme faz parte da coleção, mas não está no seu compartilhamento.</string>
     <string name="browse_suca_connected">Suca Media conectado</string>
     <string name="browse_open_settings">Ajustes do app</string>
     <string name="row_continue_watching">Continuar assistindo</string>

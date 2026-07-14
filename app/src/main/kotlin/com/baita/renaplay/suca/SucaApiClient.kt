@@ -8,6 +8,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 
@@ -113,6 +114,43 @@ class SucaApiClient(context: Context, private val http: OkHttpClient = SucaHttpC
             }
         } catch (e: Exception) {
             SucaResult.Failure(e.message ?: "Falha de conexão")
+        }
+    }
+
+    /**
+     * A coleção a que este filme pertence, do TMDB (belongs_to_collection). Devolve Success(null)
+     * quando o filme não pertence a nenhuma — e Failure quando o backend é antigo e não conhece a
+     * rota, caso em que quem chama volta a inferir a sequência pelo nome do arquivo.
+     */
+    fun collection(session: SucaSession, tmdbId: Int, language: String = "pt-BR"): SucaResult<SucaCollection?> {
+        return try {
+            val url = "${session.baseUrl}/api/public/v1/collection?tmdb_id=$tmdbId&language=$language"
+            http.newCall(authedRequest(session, url).build()).execute().use { response ->
+                val text = response.body?.string().orEmpty()
+                if (!response.isSuccessful) return SucaResult.Failure("Erro ${response.code}")
+                val raw = JSONObject(text).optJSONObject("collection")
+                    ?: return SucaResult.Success(null)
+                val parts = raw.optJSONArray("parts") ?: JSONArray()
+                SucaResult.Success(
+                    SucaCollection(
+                        id = raw.optInt("id"),
+                        name = raw.optString("name"),
+                        posterUrl = raw.optString("poster_url").takeIf { it.isNotBlank() && it != "null" },
+                        parts = (0 until parts.length()).mapNotNull { i ->
+                            val o = parts.optJSONObject(i) ?: return@mapNotNull null
+                            SucaCollectionPart(
+                                tmdbId = o.optInt("tmdb_id"),
+                                title = o.optString("title"),
+                                releaseYear = o.optString("release_year").takeIf { it.isNotBlank() && it != "null" },
+                                posterUrl = o.optString("poster_url").takeIf { it.isNotBlank() && it != "null" },
+                                overview = o.optString("overview")
+                            )
+                        }
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            SucaResult.Failure(e.message ?: "falha ao consultar a coleção")
         }
     }
 

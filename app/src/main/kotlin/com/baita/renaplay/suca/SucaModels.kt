@@ -40,3 +40,22 @@ data class SucaSubtitleResult(
     val hd: Boolean,
     val uploader: String?
 )
+
+/**
+ * Coleção do TMDB (o "movie set" que o Kodi usa): a trilogia inteira, em ordem de lançamento,
+ * inclusive as partes que ainda não estão no compartilhamento.
+ */
+data class SucaCollection(
+    val id: Int,
+    val name: String,
+    val posterUrl: String?,
+    val parts: List<SucaCollectionPart>
+)
+
+data class SucaCollectionPart(
+    val tmdbId: Int,
+    val title: String,
+    val releaseYear: String?,
+    val posterUrl: String?,
+    val overview: String
+)

@@ -15,6 +15,7 @@ import androidx.leanback.widget.ClassPresenterSelector
 import androidx.leanback.widget.DetailsOverviewRow
 import androidx.leanback.widget.FullWidthDetailsOverviewRowPresenter
 import androidx.leanback.widget.ListRow
+import android.widget.Toast
 import androidx.leanback.widget.ListRowPresenter
 import androidx.leanback.widget.OnActionClickedListener
 import androidx.lifecycle.lifecycleScope
@@ -22,6 +23,7 @@ import com.baita.renaplay.R
 import com.baita.renaplay.browse.CardPresenter
 import com.baita.renaplay.browse.Colecoes
 import com.baita.renaplay.browse.MediaItem
+import com.baita.renaplay.browse.MediaCategory
 import com.baita.renaplay.browse.MediaKind
 import com.baita.renaplay.browse.TitleCleaner
 import com.baita.renaplay.browse.toTmdbMediaType
@@ -35,6 +37,7 @@ import com.baita.renaplay.player.PlaybackActivity
 import com.baita.renaplay.subtitles.SubtitleSearchActivity
 import com.baita.renaplay.suca.PosterLookup
 import com.baita.renaplay.suca.SucaApiClient
+import com.baita.renaplay.suca.SucaCollection
 import com.baita.renaplay.suca.SucaResult
 import com.squareup.picasso.Picasso
 import kotlinx.coroutines.Dispatchers
@@ -45,6 +48,8 @@ private const val ACTION_PLAY = 1L
 private const val ACTION_SUBTITLES = 2L
 private const val ACTION_VIEW_EPISODES = 3L
 private const val ACTION_CONVERT = 4L
+
+private const val PREFIXO_FALTANTE = "tmdb-faltante-"
 
 class DetailFragment : DetailsSupportFragment() {
 
@@ -83,6 +88,7 @@ class DetailFragment : DetailsSupportFragment() {
         })
         buildOverviewRow()
         adapter = rowsAdapter
+        configurarCliquesDaColecao()
         mostrarColecao()
 
         BackgroundManager.getInstance(requireActivity()).apply {
@@ -91,6 +97,28 @@ class DetailFragment : DetailsSupportFragment() {
         }
 
         enrichFromSucaMedia()
+    }
+
+    private fun configurarCliquesDaColecao() {
+        onItemViewClickedListener = androidx.leanback.widget.OnItemViewClickedListener { _, alvo, _, _ ->
+            val outro = alvo as? MediaItem ?: return@OnItemViewClickedListener
+            if (outro.path.isBlank()) {
+                Toast.makeText(requireContext(), getString(R.string.collection_missing_toast), Toast.LENGTH_LONG).show()
+            } else if (outro.path != item.path) {
+                startActivity(
+                    Intent(requireContext(), DetailActivity::class.java).apply {
+                        putExtra(DetailActivity.EXTRA_ID, outro.id)
+                        putExtra(DetailActivity.EXTRA_TITLE, outro.title)
+                        putExtra(DetailActivity.EXTRA_KIND, outro.kind.name)
+                        putExtra(DetailActivity.EXTRA_PATH, outro.path)
+                        putExtra(DetailActivity.EXTRA_IS_DIRECTORY, outro.isDirectory)
+                        putExtra(DetailActivity.EXTRA_EPISODE_COUNT, outro.episodeCount)
+                        putExtra(DetailActivity.EXTRA_SEASON_COUNT, outro.seasonCount)
+                        outro.tmdbId?.let { putExtra(DetailActivity.EXTRA_TMDB_ID, it) }
+                    }
+                )
+            }
+        }
     }
 
     private fun buildOverviewPresenter(): FullWidthDetailsOverviewRowPresenter {
@@ -114,19 +142,80 @@ class DetailFragment : DetailsSupportFragment() {
      * para a próxima parte.
      */
     private fun mostrarColecao() {
-        if (item.kind != MediaKind.MOVIE) { android.util.Log.i("RenaPlayCol", "não é filme"); return }
-        val config = ServerConfigStore.load(requireContext()) ?: run { android.util.Log.i("RenaPlayCol", "sem config"); return }
-        val biblioteca = LibraryCacheStore.load(requireContext(), config) ?: run { android.util.Log.i("RenaPlayCol", "sem cache"); return }
-        android.util.Log.i("RenaPlayCol", "biblioteca=${biblioteca.size} item='${item.title}' path='${item.path}'")
-        android.util.Log.i("RenaPlayCol", "coleções=" + Colecoes.agrupar(biblioteca).joinToString { "${it.nome}(${it.total})" })
-        val colecao = Colecoes.colecaoDe(item, biblioteca) ?: run { android.util.Log.i("RenaPlayCol", "sem coleção para este filme"); return }
+        if (item.kind != MediaKind.MOVIE) return
+        val config = ServerConfigStore.load(requireContext()) ?: return
+        val biblioteca = LibraryCacheStore.load(requireContext(), config) ?: return
 
-        val cards = ArrayObjectAdapter(CardPresenter())
-        cards.addAll(0, colecao.filmes)
-        val posicao = colecao.posicaoDe(item)
-        val titulo = getString(R.string.collection_row, colecao.nome, posicao, colecao.total)
-        rowsAdapter.add(ListRow(HeaderItem(titulo), cards))
+        lifecycleScope.launch {
+            // Primeiro a coleção DE VERDADE, do TMDB (é o "movie set" que o Kodi usa). Ela sabe da
+            // trilogia inteira — inclusive das partes que ainda não estão no compartilhamento, o que
+            // é metade da graça: dá para ver o que falta.
+            val doTmdb = colecaoDoTmdb()
+            if (doTmdb != null && doTmdb.parts.size > 1) {
+                mostrarPartes(doTmdb, biblioteca)
+                return@launch
+            }
+            // Sem TMDB (não pareado, backend antigo, filme sem coleção): infere pelo nome e pelo ano.
+            val local = Colecoes.colecaoDe(item, biblioteca) ?: return@launch
+            val cards = ArrayObjectAdapter(CardPresenter())
+            cards.addAll(0, local.filmes)
+            rowsAdapter.add(
+                ListRow(
+                    HeaderItem(getString(R.string.collection_row, local.nome, local.posicaoDe(item), local.total)),
+                    cards
+                )
+            )
+        }
     }
+
+    private suspend fun colecaoDoTmdb(): SucaCollection? {
+        val tmdb = item.tmdbId ?: run { android.util.Log.i("RenaPlayCol", "sem tmdbId"); return null }
+        val session = SucaAuthStore.load(requireContext()) ?: run { android.util.Log.i("RenaPlayCol", "não pareado"); return null }
+        return withContext(Dispatchers.IO) {
+            when (val r = SucaApiClient(requireContext()).collection(session, tmdb)) {
+                is SucaResult.Success -> {
+                    android.util.Log.i("RenaPlayCol", "coleção TMDB: ${r.value?.name} (${r.value?.parts?.size} partes)")
+                    r.value
+                }
+                is SucaResult.Failure -> {
+                    android.util.Log.e("RenaPlayCol", "falha na coleção TMDB: ${r.message}")
+                    null
+                }
+            }
+        }
+    }
+
+    /**
+     * A coleção inteira, em ordem de lançamento. O que está na biblioteca abre; o que falta aparece
+     * marcado — é a "previsão da sequência": dá para saber que existe uma parte 3 antes de procurá-la.
+     */
+    private fun mostrarPartes(colecao: SucaCollection, biblioteca: List<MediaItem>) {
+        val cards = ArrayObjectAdapter(CardPresenter())
+        var posicao = 0
+        colecao.parts.forEachIndexed { i, parte ->
+            val naBiblioteca = biblioteca.firstOrNull { it.tmdbId == parte.tmdbId }
+                ?: biblioteca.firstOrNull { mesmoTitulo(it.title, parte.title) }
+            if (parte.tmdbId == item.tmdbId) posicao = i + 1
+            cards.add(
+                naBiblioteca?.copy(remotePosterUrl = naBiblioteca.remotePosterUrl ?: parte.posterUrl)
+                    ?: MediaItem(
+                        id = "$PREFIXO_FALTANTE${parte.tmdbId}",
+                        title = getString(R.string.collection_missing, parte.title),
+                        kind = MediaKind.MOVIE,
+                        path = "",
+                        isDirectory = false,
+                        category = MediaCategory.FILME,
+                        remotePosterUrl = parte.posterUrl,
+                        tmdbId = parte.tmdbId
+                    )
+            )
+        }
+        val cabecalho = getString(R.string.collection_row, colecao.name, posicao, colecao.parts.size)
+        rowsAdapter.add(ListRow(HeaderItem(cabecalho), cards))
+    }
+
+    private fun mesmoTitulo(a: String, b: String) =
+        a.substringBeforeLast(" (").equals(b, ignoreCase = true)
 
     private fun buildOverviewRow() {
         overviewRow = DetailsOverviewRow(display)
