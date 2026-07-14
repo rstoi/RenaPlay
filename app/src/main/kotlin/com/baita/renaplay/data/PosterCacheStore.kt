@@ -8,7 +8,7 @@ import org.json.JSONObject
  * [tmdbId] é o id TMDB do casamento — propagado até o player para telemetria de atividade e
  * busca de legenda, quando disponível.
  */
-data class CachedPoster(val tmdbId: Int?, val posterUrl: String?)
+data class CachedPoster(val tmdbId: Int?, val posterUrl: String?, val titulo: String? = null)
 
 /**
  * Cache persistido de resoluções TMDB via Suca Media, chaveado por título limpo, para não
@@ -27,15 +27,17 @@ object PosterCacheStore {
             val o = JSONObject(raw)
             CachedPoster(
                 tmdbId = if (o.isNull("tmdbId")) null else o.optInt("tmdbId"),
-                posterUrl = o.optString("posterUrl").takeIf { it.isNotBlank() && it != "null" }
+                posterUrl = o.optString("posterUrl").takeIf { it.isNotBlank() && it != "null" },
+                titulo = o.optString("titulo").takeIf { it.isNotBlank() && it != "null" }
             )
         }.getOrNull()
     }
 
-    fun put(context: Context, key: String, tmdbId: Int?, posterUrl: String?) {
+    fun put(context: Context, key: String, tmdbId: Int?, posterUrl: String?, titulo: String? = null) {
         val json = JSONObject().apply {
             put("tmdbId", tmdbId ?: JSONObject.NULL)
             put("posterUrl", posterUrl ?: JSONObject.NULL)
+            put("titulo", titulo ?: JSONObject.NULL)
         }
         prefs(context).edit().putString(key.lowercase(), json.toString()).apply()
     }

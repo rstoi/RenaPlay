@@ -18,7 +18,9 @@ class LocalSubtitleProvider(private val client: SmbClient) {
         return result.value
             // Nunca mostra nada além de arquivos de legenda de verdade (extensão + não-diretório).
             .filter { !it.isDirectory && SUBTITLE_EXTENSIONS.contains(it.name.substringAfterLast('.', "").lowercase()) }
-            .sortedByDescending { subtitleMatchScore(videoName, it.name) }
+            // As que casam de verdade primeiro; as demais continuam listadas (o usuário pode
+            // escolher à mão uma legenda com nome estranho), só que no fim.
+            .sortedByDescending { SubtitleMatcher.pontuar(videoName, it.name) ?: -1 }
             .map {
                 SubtitleResult(
                     source = SubtitleSource.LOCAL,

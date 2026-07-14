@@ -33,12 +33,20 @@
     <string name="row_personal">Pessoais</string>
     <string name="row_other">Outros</string>
     <string name="row_settings">Configurações</string>
+    <string name="collection_row">%1$s · parte %2$d de %3$d</string>
+    <string name="browse_suca_connected">Suca Media conectado</string>
+    <string name="browse_open_settings">Ajustes do app</string>
     <string name="row_continue_watching">Continuar assistindo</string>
     <string name="scanning_library">Procurando na biblioteca…</string>
 
     <!-- Detail -->
     <string name="action_play">Assistir</string>
+    <string name="resume_title">Continuar de onde parou?</string>
+    <string name="resume_message">Você parou em %1$s.</string>
+    <string name="resume_continue">Continuar</string>
+    <string name="resume_restart">Começar do início</string>
     <string name="action_subtitles">Legendas</string>
+    <string name="action_convert">Converter para H.264</string>
     <string name="action_change_server">Trocar servidor</string>
     <string name="action_view_episodes">Ver episódios</string>
 
@@ -62,11 +70,17 @@
     <string name="convert_progress_title">Convertendo vídeo…</string>
     <string name="convert_progress_starting">Procurando o serviço de conversão…</string>
     <string name="convert_progress_uploading">Enviando o vídeo para o servidor…</string>
+    <string name="convert_progress_uploading_pct">Enviando o vídeo para o servidor… %1$d%%</string>
+    <string name="convert_progress_processing">O servidor está recebendo o vídeo…</string>
     <string name="convert_progress_running">Convertendo… %1$d%%</string>
+    <string name="convert_progress_downloading_pct">Baixando a versão convertida… %1$d%%</string>
     <string name="convert_progress_saving">Salvando a versão convertida…</string>
+    <string name="convert_progress_background">Continuar em segundo plano</string>
+    <string name="convert_channel_name">Conversão de vídeo</string>
     <string name="convert_done">Pronto! Reproduzindo a versão em H.264.</string>
     <string name="convert_error">Falha na conversão: %1$s</string>
     <string name="convert_error_no_service">Serviço de conversão HEVC264 não encontrado na rede local.</string>
+    <string name="convert_error_stalled">O servidor de conversão parou de responder. Verifique se o HEVC264 ainda está rodando e tente de novo.</string>
 
     <!-- Player: faixas de áudio/legenda -->
     <string name="track_picker_subtitles_title">Legendas</string>
@@ -84,6 +98,9 @@
     <string name="settings_key_invalid">Digite uma chave de API.</string>
     <string name="settings_key_ok">Chave válida!</string>
     <string name="settings_key_fail">Chave inválida ou sem acesso.</string>
+    <string name="settings_convert_mode">Onde converter os vídeos</string>
+    <string name="settings_convert_mode_server">No servidor: ele lê e grava no compartilhamento sozinho (recomendado)</string>
+    <string name="settings_convert_mode_device">Neste aparelho: envia o vídeo ao conversor e traz o resultado de volta</string>
     <string name="settings_suca_pairing">Parear com Suca Media</string>
     <string name="settings_suca_connected">Suca Media: conectado (%1$s)</string>
     <string name="settings_suca_not_connected">Suca Media: não conectado</string>

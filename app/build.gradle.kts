@@ -96,4 +96,7 @@ dependencies {
 
     // Testes JVM puros (sem Android/emulador) para a lógica de parsing/heurísticas
     testImplementation("junit:junit:4.13.2")
+    // Servidor HTTP de mentira: deixa testar o SSE de progresso — inclusive um servidor que
+    // emudece no meio, que é o caso que travava a conversão.
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }

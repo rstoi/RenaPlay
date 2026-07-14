@@ -22,7 +22,7 @@ class CardPresenter : Presenter() {
     override fun onCreateViewHolder(parent: ViewGroup): ViewHolder {
         val view = LayoutInflater.from(parent.context)
             .inflate(R.layout.view_media_card, parent, false)
-        view.findViewById<TextView>(R.id.card_title).typeface = Typefaces.display(parent.context)
+        view.findViewById<TextView>(R.id.card_title).typeface = Typefaces.title(parent.context)
         view.setOnFocusChangeListener { v, hasFocus ->
             val scale = if (hasFocus) FOCUS_SCALE else 1f
             v.animate().scaleX(scale).scaleY(scale).setDuration(FOCUS_DURATION_MS).start()

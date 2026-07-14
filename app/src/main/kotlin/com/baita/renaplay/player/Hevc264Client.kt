@@ -6,6 +6,7 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSink
 import okio.source
 import org.json.JSONObject
@@ -15,6 +16,7 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.SocketTimeoutException
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 
@@ -33,6 +35,41 @@ data class Hevc264Progress(
 object Hevc264Discovery {
     private const val DISCOVERY_PORT = 8766
     private const val QUERY = "HEVC264?"
+
+    /**
+     * TODOS os serviços que responderem, não só o primeiro. Com mais de um conversor na rede, o
+     * "primeiro que gritar" é sorteio — e uma conversão que já está rolando no outro fica invisível:
+     * o aparelho jura que não há nada em andamento e oferece converter tudo de novo.
+     */
+    fun discoverAll(timeoutMs: Int = 2500): List<String> {
+        val achados = LinkedHashSet<String>()
+        try {
+            DatagramSocket().use { sock ->
+                sock.broadcast = true
+                sock.soTimeout = timeoutMs
+                val data = QUERY.toByteArray()
+                sock.send(DatagramPacket(data, data.size, InetAddress.getByName("255.255.255.255"), DISCOVERY_PORT))
+                val deadline = System.currentTimeMillis() + timeoutMs
+                val buf = ByteArray(256)
+                while (System.currentTimeMillis() < deadline) {
+                    val resp = DatagramPacket(buf, buf.size)
+                    try {
+                        sock.receive(resp)
+                    } catch (e: SocketTimeoutException) {
+                        break
+                    }
+                    val text = String(resp.data, 0, resp.length).trim()
+                    if (text.startsWith("HEVC264|")) {
+                        val port = text.split("|").getOrNull(2)?.trim()?.toIntOrNull() ?: 8765
+                        achados += "http://${resp.address.hostAddress}:$port"
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // rede indisponível: devolve o que já achou
+        }
+        return achados.toList()
+    }
 
     fun discover(timeoutMs: Int = 2500): String? {
         return try {
@@ -66,17 +103,84 @@ object Hevc264Discovery {
     }
 }
 
+/** O servidor abandonou o job: o SSE emudeceu, ou acabou sem nunca dizer "done". */
+class Hevc264StalledException(motivo: String) : IOException(motivo) {
+    companion object {
+        const val MUDO = "o servidor de conversão ficou mudo"
+        const val SEM_DONE = "o stream de progresso acabou sem concluir a conversão"
+    }
+}
+
 /**
  * Cliente HTTP do serviço HEVC264 (upload/progress-SSE/download). Chamadas são
  * bloqueantes — usar em Dispatchers.IO. Timeouts de leitura/escrita zerados para
- * aguentar uploads/downloads grandes e o stream SSE de progresso.
+ * aguentar uploads/downloads grandes; o SSE de progresso é a exceção, ver [streamProgress].
  */
-class Hevc264Client(baseUrl: String) {
+class Hevc264Client(
+    baseUrl: String,
+    progressIdleTimeoutSeconds: Long = PROGRESS_IDLE_TIMEOUT_SECONDS
+) {
     private val base = baseUrl.trimEnd('/')
     private val http: OkHttpClient = HttpClientProvider.client.newBuilder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .writeTimeout(0, TimeUnit.MILLISECONDS)
         .build()
+
+    // O readTimeout zerado é obrigatório no upload: depois do último byte o serviço ainda leva
+    // minutos para gravar o arquivo antes de responder com o id. No SSE de progresso ele é veneno
+    // — se o job morre do outro lado, a leitura bloqueia para sempre e a conversão fica eterna num
+    // percentual qualquer (já ficou 5h em "24%"), com o foreground service vivo e sem erro nenhum.
+    // Aqui, portanto, o silêncio tem prazo.
+    private val progressHttp: OkHttpClient = http.newBuilder()
+        .readTimeout(progressIdleTimeoutSeconds, TimeUnit.SECONDS)
+        .build()
+
+    // Sem isto o OkHttp, ao ver a conexão morrer no fim do envio, REENVIA o filme inteiro sozinho —
+    // mais 1,3GB e mais um job no servidor, convertendo o mesmo arquivo em duplicata. Aqui o retry
+    // é sempre errado: quem recupera o upload perdido é a adoção do job em [jobRecemCriado].
+    private val uploadHttp: OkHttpClient = http.newBuilder()
+        .retryOnConnectionFailure(false)
+        .build()
+
+    /**
+     * Pede ao serviço que converta um arquivo que já está no compartilhamento — ele lê do SMB,
+     * converte e grava de volta sozinho. O aparelho não carrega um byte do vídeo, e a conversão
+     * não depende mais dele continuar vivo.
+     */
+    fun convertSmb(
+        ip: String, share: String, path: String,
+        user: String?, password: String?, domain: String?
+    ): String {
+        val corpo = JSONObject()
+            .put("ip", ip).put("share", share).put("path", path)
+            .put("user", user.orEmpty()).put("password", password.orEmpty())
+            .put("domain", domain.orEmpty())
+            .toString().toRequestBody("application/json".toMediaTypeOrNull())
+        val req = Request.Builder().url("$base/convert_smb").post(corpo).build()
+        http.newCall(req).execute().use { r ->
+            val text = r.body?.string().orEmpty()
+            if (!r.isSuccessful) {
+                val msg = runCatching { JSONObject(text).optString("error") }.getOrNull()
+                throw IOException(msg?.takeIf { it.isNotBlank() } ?: "convert_smb HTTP ${r.code}")
+            }
+            return JSONObject(text).getString("id")
+        }
+    }
+
+    /** O serviço sabe converter lendo direto do compartilhamento? (versões antigas não sabem) */
+    fun supportsSmbConvert(): Boolean = try {
+        val req = Request.Builder().url("$base/health").get().build()
+        http.newCall(req).execute().use { r ->
+            val feats = JSONObject(r.body?.string().orEmpty()).optJSONArray("features")
+            (0 until (feats?.length() ?: 0)).any { feats!!.getString(it) == "smb" }
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    /** Job ainda em andamento para este arquivo — usado para reencontrar uma conversão do servidor. */
+    fun jobEmAndamento(filename: String): String? =
+        buscaJob(filename) { it.optString("status") in setOf("queued", "running") }
 
     fun health(): Boolean = try {
         val req = Request.Builder().url("$base/health").get().build()
@@ -88,15 +192,79 @@ class Hevc264Client(baseUrl: String) {
         false
     }
 
-    /** Upload streaming (sem carregar o arquivo na memória). Retorna o id do job. */
-    fun upload(filename: String, contentLength: Long, openStream: () -> InputStream): String {
+    /**
+     * Upload streaming (sem carregar o arquivo na memória). Retorna o id do job.
+     *
+     * [onProgress] recebe 0..100 conforme os bytes saem. Um filme de 1,3GB leva ~12 min só para
+     * subir, na velocidade de leitura do SMB — sem esse retorno, o diálogo ficava parado em
+     * "Enviando o vídeo…" esse tempo todo e parecia travado.
+     */
+    fun upload(
+        filename: String,
+        contentLength: Long,
+        onProgress: (Int) -> Unit = {},
+        openStream: () -> InputStream
+    ): String {
+        // Se o serviço JÁ tem este arquivo convertido, não faz sentido reenviá-lo: são 20 minutos
+        // de upload e horas de recodificação para chegar ao mesmo arquivo que já está lá. Casa por
+        // nome E tamanho para não pegar carona num homônimo de conteúdo diferente.
+        jobConcluido(filename, contentLength)?.let { return it }
         val fileBody = object : RequestBody() {
             override fun contentType() = "video/octet-stream".toMediaTypeOrNull()
             override fun contentLength() = contentLength
             override fun writeTo(sink: BufferedSink) {
-                openStream().use { input -> sink.writeAll(input.source()) }
+                openStream().use { input ->
+                    val buffer = ByteArray(1 shl 16)
+                    var sent = 0L
+                    var lastPct = -1
+                    while (true) {
+                        val n = input.read(buffer)
+                        if (n == -1) break
+                        sink.write(buffer, 0, n)
+                        sent += n
+                        if (contentLength > 0) {
+                            val pct = ((sent * 100) / contentLength).toInt().coerceIn(0, 100)
+                            if (pct != lastPct) {
+                                lastPct = pct
+                                onProgress(pct)
+                            }
+                        }
+                    }
+                }
             }
         }
+        // /upload_raw manda o arquivo como corpo cru. O /upload multipart faz o serviço gravar o
+        // vídeo DUAS vezes — o Werkzeug materializa o multipart num temporário e depois copia
+        // 1,3GB para a pasta de trabalho, cópia que só começa depois do último byte chegar. Era
+        // esse o silêncio de mais de 20 minutos entre "enviando 100%" e o começo da conversão.
+        //
+        // O suporte é sondado ANTES de mandar o arquivo, e não descobrindo pelo 404 da resposta:
+        // um serviço antigo só recusaria a rota depois de engolir o 1,3GB, e o fallback subiria
+        // tudo de novo.
+        if (supportsRawUpload()) {
+            val name = URLEncoder.encode(filename, "UTF-8")
+            val rawReq = Request.Builder().url("$base/upload_raw?name=$name").post(fileBody).build()
+            try {
+                uploadHttp.newCall(rawReq).execute().use { r ->
+                    val text = r.body?.string().orEmpty()
+                    if (!r.isSuccessful) throw IOException("upload HTTP ${r.code}")
+                    return JSONObject(text).getString("id")
+                }
+            } catch (e: IOException) {
+                // O último byte enviado não é o fim da história: o waitress só entrega o corpo ao
+                // serviço DEPOIS de bufferizá-lo inteiro, e o serviço então copia os 1,3GB de novo
+                // para a pasta de trabalho. São minutos de silêncio na conexão — e num filme foi
+                // nesse silêncio que o socket do Fire TV morreu, jogando fora 20 minutos de envio
+                // de um arquivo que o servidor já tinha recebido e começado a converter.
+                //
+                // Antes de dar o upload por perdido, pergunta ao serviço se o job existe: se o
+                // arquivo chegou lá, ele é adotado e a conversão segue de onde estava.
+                val adotado = jobRecemCriado(filename)
+                    ?: throw e
+                return adotado
+            }
+        }
+
         val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("file", filename, fileBody)
             .build()
@@ -108,15 +276,78 @@ class Hevc264Client(baseUrl: String) {
         }
     }
 
-    /** Consome o SSE de /progress/<id>, chamando onProgress a cada evento (bloqueante). */
+    /** Job já concluído para este mesmo arquivo (nome + tamanho): dá para pular o upload inteiro. */
+    private fun jobConcluido(filename: String, contentLength: Long): String? =
+        buscaJob(filename) { it.optString("status") == "done" && it.optLong("size", -1) == contentLength }
+
+    /**
+     * Procura no serviço um job recém-criado para [filename] — o upload que "falhou" mas chegou.
+     * Só considera jobs jovens (2 min) para não adotar a conversão de uma tentativa antiga.
+     */
+    private fun jobRecemCriado(filename: String): String? =
+        buscaJob(filename) {
+            it.optString("status") != "error" &&
+                it.optInt("idade_s", Int.MAX_VALUE) < ADOPTION_MAX_AGE_SECONDS
+        }
+
+    /** Consulta /jobs e devolve o id do job MAIS NOVO que casa com [filename] e [aceita]. */
+    fun buscaJob(filename: String, aceita: (JSONObject) -> Boolean): String? = try {
+        val req = Request.Builder().url("$base/jobs").get().build()
+        http.newCall(req).execute().use { r ->
+            if (!r.isSuccessful) null
+            else {
+                val jobs = JSONObject(r.body?.string().orEmpty()).getJSONArray("jobs")
+                (0 until jobs.length()).map { jobs.getJSONObject(it) }
+                    .filter { it.optString("name") == filename && aceita(it) }
+                    .minByOrNull { it.optInt("idade_s", Int.MAX_VALUE) }
+                    ?.optString("id")
+                    ?.takeIf { it.isNotBlank() }
+            }
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    /**
+     * O serviço conhece /upload_raw? Sonda com um corpo vazio: a versão nova recusa por falta de
+     * Content-Length (411), a antiga não tem a rota (404). Qualquer resposta que não seja
+     * "rota inexistente" significa que ela existe.
+     */
+    private fun supportsRawUpload(): Boolean = try {
+        val probe = Request.Builder()
+            .url("$base/upload_raw")
+            .post(ByteArray(0).toRequestBody(null))
+            .build()
+        http.newCall(probe).execute().use { it.code != 404 && it.code != 405 }
+    } catch (e: Exception) {
+        false
+    }
+
+    /**
+     * Consome o SSE de /progress/<id>, chamando onProgress a cada evento (bloqueante).
+     *
+     * Lança [Hevc264StalledException] nos dois jeitos que o servidor tem de sumir: ficar mudo além
+     * do prazo, ou encerrar o stream sem nunca mandar "done". Um stream que acaba no meio NÃO é
+     * sucesso — sem isso, quem chama seguia para o download de um arquivo que não existe.
+     */
     fun streamProgress(id: String, onProgress: (Hevc264Progress) -> Unit) {
         val req = Request.Builder().url("$base/progress/$id").get()
             .header("Accept", "text/event-stream").build()
-        http.newCall(req).execute().use { r ->
+        val call = try {
+            progressHttp.newCall(req).execute()
+        } catch (e: SocketTimeoutException) {
+            throw Hevc264StalledException(Hevc264StalledException.MUDO)
+        }
+        call.use { r ->
             if (!r.isSuccessful) throw IOException("progress HTTP ${r.code}")
             val source = r.body?.source() ?: throw IOException("sem corpo em /progress")
-            while (true) {
-                val line = source.readUtf8Line() ?: break
+            var finished = false
+            while (!finished) {
+                val line = try {
+                    source.readUtf8Line() ?: break
+                } catch (e: SocketTimeoutException) {
+                    throw Hevc264StalledException(Hevc264StalledException.MUDO)
+                }
                 if (!line.startsWith("data:")) continue
                 val payload = line.substringAfter("data:").trim()
                 if (payload.isEmpty()) continue
@@ -135,18 +366,66 @@ class Hevc264Client(baseUrl: String) {
                 val eta = if (json.isNull("eta")) "" else json.optString("eta")
                 val done = err != null || status.equals("done", true)
                 onProgress(Hevc264Progress(status, prog, eta, done, err))
-                if (done) break
+                if (done) finished = true
             }
+            if (!finished) throw Hevc264StalledException(Hevc264StalledException.SEM_DONE)
         }
     }
 
-    /** Baixa o convertido, entregando o InputStream para gravação direta (sem temp local). */
-    fun download(id: String, writeTo: (InputStream) -> Unit) {
+    /**
+     * Baixa o convertido, entregando o InputStream para gravação direta (sem temp local).
+     * [onProgress] recebe 0..100 — o arquivo volta pela rede e é gravado no SMB, o que também
+     * leva minutos num filme.
+     */
+    fun download(id: String, onProgress: (Int) -> Unit = {}, writeTo: (InputStream) -> Unit) {
         val req = Request.Builder().url("$base/download/$id").get().build()
         http.newCall(req).execute().use { r ->
             if (!r.isSuccessful) throw IOException("download HTTP ${r.code}")
             val body = r.body ?: throw IOException("sem corpo em /download")
-            writeTo(body.byteStream())
+            val total = body.contentLength()
+            val stream = if (total > 0) ProgressInputStream(body.byteStream(), total, onProgress)
+                         else body.byteStream()
+            writeTo(stream)
         }
     }
+
+    companion object {
+        /**
+         * Silêncio tolerado no SSE antes de dar o job por perdido. Generoso de propósito: o serviço
+         * manda evento a cada poucos segundos enquanto o ffmpeg roda, então três minutos calados
+         * significam servidor morto, não conversão lenta.
+         */
+        const val PROGRESS_IDLE_TIMEOUT_SECONDS = 180L
+
+        /** Idade máxima de um job para ser adotado como sendo o desta tentativa de upload. */
+        private const val ADOPTION_MAX_AGE_SECONDS = 900
+    }
+}
+
+/** Conta os bytes lidos e reporta a porcentagem, sem bufferizar nada. */
+private class ProgressInputStream(
+    private val delegate: InputStream,
+    private val total: Long,
+    private val onProgress: (Int) -> Unit
+) : InputStream() {
+    private var read = 0L
+    private var lastPct = -1
+
+    private fun advance(n: Int) {
+        if (n <= 0) return
+        read += n
+        val pct = ((read * 100) / total).toInt().coerceIn(0, 100)
+        if (pct != lastPct) {
+            lastPct = pct
+            onProgress(pct)
+        }
+    }
+
+    override fun read(): Int = delegate.read().also { if (it != -1) advance(1) }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int =
+        delegate.read(b, off, len).also { advance(it) }
+
+    override fun available(): Int = delegate.available()
+    override fun close() = delegate.close()
 }

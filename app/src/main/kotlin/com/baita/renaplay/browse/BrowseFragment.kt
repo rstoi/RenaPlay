@@ -22,11 +22,13 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.baita.renaplay.R
 import com.baita.renaplay.brand.BrandWordmark
+import com.baita.renaplay.data.EpisodeThumbnailStore
 import com.baita.renaplay.data.LibraryCacheStore
 import com.baita.renaplay.data.ServerConfigStore
 import com.baita.renaplay.data.SucaAuthStore
 import com.baita.renaplay.data.SucaSession
 import com.baita.renaplay.data.WatchProgressStore
+import com.baita.renaplay.pairing.PairingActivity
 import com.baita.renaplay.detail.DetailActivity
 import com.baita.renaplay.player.PlaybackActivity
 import com.baita.renaplay.setup.ServerSetupActivity
@@ -68,11 +70,21 @@ class BrowseFragment : BrowseSupportFragment() {
 
     override fun onResume() {
         super.onResume()
-        // Refaz o bind das linhas (sem rescanear o SMB) para que a barra de progresso
-        // de "assistido" reflita o que acabou de ser visto ao voltar do player.
+        // Refaz o bind das linhas para que a barra de progresso de "assistido" reflita o que acabou
+        // de ser visto ao voltar do player.
         itemAdapters.forEach { it.notifyArrayItemRangeChanged(0, it.size()) }
         statusHandler.post(statusUpdater)
+
+        // E revarre o compartilhamento: um arquivo novo copiado para o SMB, ou um filme que acabou
+        // de ser convertido (o .mkv vira .mp4), só apareceria na próxima abertura do app. Como a
+        // varredura roda em segundo plano e a grade já está montada a partir do cache, isto não
+        // custa espera nenhuma para quem está olhando.
+        if (!primeiraCarga) loadLibrary()
+        primeiraCarga = false
     }
+
+    /** onViewCreated já varre; não faz sentido varrer duas vezes na abertura. */
+    private var primeiraCarga = true
 
     override fun onPause() {
         super.onPause()
@@ -232,6 +244,8 @@ class BrowseFragment : BrowseSupportFragment() {
             rowsAdapter.add(ListRow(HeaderItem(getString(titleRes)), itemsAdapter))
         }
 
+        rowsAdapter.add(settingsRow())
+
         adapter = rowsAdapter
         loadCloudLibrary(rowsAdapter)
         updateStatus()
@@ -249,22 +263,53 @@ class BrowseFragment : BrowseSupportFragment() {
         val inProgress = WatchProgressStore.listInProgress(requireContext())
         if (inProgress.isEmpty()) return
 
-        val items = inProgress.map { ip ->
+        // O progresso guarda o caminho e o título de QUANDO foi assistido — e os dois envelhecem:
+        // converter renomeia "filme.mkv" para "filme.mp4", e o título pode ter sido limpo desde
+        // então. Sem casar com a biblioteca atual, esta linha exibia o nome sujo antigo e o card
+        // abria um arquivo que não existe mais (o player ficava eternamente em "--/--").
+        val items = inProgress.mapNotNull { ip ->
+            val atual = localItems.firstOrNull { it.path == ip.path }
+                ?: localItems.firstOrNull { mesmaObra(it.path, ip.path) }
+                ?: return@mapNotNull null  // sumiu do compartilhamento: não oferece o que não existe
             MediaItem(
-                id = "$CONTINUE_WATCHING_ID_PREFIX${ip.path}",
-                title = ip.title,
+                id = "$CONTINUE_WATCHING_ID_PREFIX${atual.path}",
+                title = atual.title,
                 kind = if (ip.mediaType == "tv") MediaKind.SERIES else MediaKind.MOVIE,
-                path = ip.path,
+                path = atual.path,
                 isDirectory = false,
                 category = MediaCategory.FILME,
-                tmdbId = ip.tmdbId
+                tmdbId = atual.tmdbId ?: ip.tmdbId,
+                remotePosterUrl = atual.remotePosterUrl
             )
         }
+            // Converter deixa DUAS entradas de progresso para o mesmo filme (o .mkv de antes e o
+            // .mp4 de agora), e as duas apontam para o mesmo arquivo depois de casadas com a
+            // biblioteca — o card aparecia repetido na linha.
+            .distinctBy { it.path }
+        if (items.isEmpty()) return
         val continueAdapter = ArrayObjectAdapter(CardPresenter())
         continueAdapter.addAll(0, items)
         itemAdapters += continueAdapter
         rowsAdapter.add(ListRow(HeaderItem(getString(R.string.row_continue_watching)), continueAdapter))
     }
+
+    /**
+     * Título do TMDB quando ele existe — é o que está escrito no pôster. Episódio mantém o próprio
+     * nome (o TMDB devolveria o nome da SÉRIE, e a linha viraria uma coluna de títulos repetidos).
+     */
+    private fun tituloExibido(media: MediaItem, tmdb: String?): String {
+        if (media.kind == MediaKind.SERIES && media.path.contains('/')) return media.title
+        val novo = tmdb?.takeIf { it.isNotBlank() } ?: return media.title
+        // O ano vem do arquivo e não vem do TMDB — sem reanexá-lo, "Antes do Pôr do Sol (2004)"
+        // viraria só "Antes do Pôr do Sol", e a grade perderia a única pista de qual é qual numa
+        // franquia.
+        val ano = Regex("\\((19\\d{2}|20\\d{2})\\)\\s*$").find(media.title)?.value?.trim()
+        return if (ano != null && !novo.contains(ano)) "$novo $ano" else novo
+    }
+
+    /** Mesmo arquivo depois da conversão: só muda a extensão ("filme.mkv" -> "filme.mp4"). */
+    private fun mesmaObra(a: String, b: String): Boolean =
+        a.substringBeforeLast('.') == b.substringBeforeLast('.')
 
     private fun resumePlayback(item: MediaItem) {
         val intent = Intent(requireContext(), PlaybackActivity::class.java).apply {
@@ -291,16 +336,64 @@ class BrowseFragment : BrowseSupportFragment() {
                     val media = itemsAdapter.get(index) as? MediaItem ?: continue
                     if (media.remotePosterUrl != null || media.category !in POSTER_ELIGIBLE_CATEGORIES) continue
 
+                    // Episódio em "Continuar assistindo": se a tela de episódios já extraiu um
+                    // frame dele, reaproveita (consulta só o disco, não a rede).
+                    val cachedThumb = if (media.kind == MediaKind.SERIES) {
+                        EpisodeThumbnailStore.cachedUri(context, media.path)
+                    } else null
+                    if (cachedThumb != null) {
+                        itemsAdapter.replace(index, media.copy(remotePosterUrl = cachedThumb))
+                        continue
+                    }
+
+                    // Sem frame: cai no pôster da SÉRIE. Buscar pelo título do episódio não casa
+                    // com nada no TMDB, que não indexa episódios.
+                    //
+                    // O nome vem da PASTA, não do título do episódio: a pasta carrega o ano
+                    // ("taken 2002") e é dele que o PosterLookup precisa para não confundir a
+                    // minissérie de 2002 com a série homônima de 2017. É também a mesma pasta que
+                    // a lista de séries usa — as duas telas chegam ao mesmo pôster por construção.
+                    val query = if (media.kind == MediaKind.SERIES) {
+                        TitleCleaner.seriesTitleFromPath(media.path)
+                            ?: TitleCleaner.seriesName(media.title)
+                    } else media.title
+
                     val match = withContext(Dispatchers.IO) {
-                        PosterLookup.resolve(context, session, media.kind, media.title)
+                        PosterLookup.resolve(context, session, media.kind, query)
                     }
 
                     if (match?.posterUrl != null) {
-                        itemsAdapter.replace(index, media.copy(remotePosterUrl = match.posterUrl, tmdbId = match.tmdbId))
+                        // O título vem junto com o pôster: é o nome que está impresso na arte.
+                        itemsAdapter.replace(
+                            index,
+                            media.copy(
+                                title = tituloExibido(media, match.titulo),
+                                remotePosterUrl = match.posterUrl,
+                                tmdbId = match.tmdbId
+                            )
+                        )
                     }
                 }
             }
+            gravarBibliotecaEnriquecida(context)
         }
+    }
+
+    /**
+     * Salva no cache a biblioteca COM os títulos do TMDB. Sem isto, o cache guarda o nome do arquivo
+     * ("Before Midnight") enquanto a tela mostra o do TMDB ("Antes da Meia-Noite") — e quem lê o
+     * cache, como a tela de detalhe, não reconhece que "Antes do Amanhecer" e "Antes da Meia-Noite"
+     * são o mesmo filme em três partes: para ela, um se chama "Antes" e o outro "Before".
+     */
+    private fun gravarBibliotecaEnriquecida(context: android.content.Context) {
+        val config = ServerConfigStore.load(context) ?: return
+        val atuais = itemAdapters
+            .flatMap { adapter -> (0 until adapter.size()).mapNotNull { adapter.get(it) as? MediaItem } }
+            .filterNot { it.id.startsWith(CONTINUE_WATCHING_ID_PREFIX) }
+            .distinctBy { it.path }
+        if (atuais.isEmpty()) return
+        localItems = atuais
+        LibraryCacheStore.save(context, config, atuais)
     }
 
     /**
@@ -360,8 +453,27 @@ class BrowseFragment : BrowseSupportFragment() {
         startActivity(intent)
     }
 
+    /**
+     * Linha "Configurações" no menu vertical. É o único caminho de teclado para o pareamento: o
+     * status no canto superior direito também abre os ajustes, mas o D-pad não chega nele — de
+     * "Filmes" para cima o foco não sai do menu, e num Fire TV sem toque isso deixava o pareamento
+     * com o Suca Media inalcançável num aparelho novo.
+     */
+    private fun settingsRow(): ListRow {
+        val paired = SucaAuthStore.load(requireContext()) != null
+        val actions = ArrayObjectAdapter(SettingsActionPresenter()).apply {
+            add(SettingsAction(
+                SettingsActionIds.SUCA_PAIRING,
+                getString(if (paired) R.string.browse_suca_connected else R.string.settings_suca_pairing)
+            ))
+            add(SettingsAction(SettingsActionIds.OPEN_SETTINGS, getString(R.string.browse_open_settings)))
+        }
+        return ListRow(HeaderItem(getString(R.string.row_settings)), actions)
+    }
+
     private fun handleSettingsAction(action: SettingsAction) {
         when (action.id) {
+            SettingsActionIds.SUCA_PAIRING -> startActivity(Intent(requireContext(), PairingActivity::class.java))
             SettingsActionIds.OPEN_SETTINGS -> startActivity(Intent(requireContext(), SettingsActivity::class.java))
             SettingsActionIds.CHANGE_SERVER -> {
                 ServerConfigStore.clear(requireContext())

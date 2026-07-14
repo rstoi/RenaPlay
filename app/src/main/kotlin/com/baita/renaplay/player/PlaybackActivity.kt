@@ -17,6 +17,16 @@ class PlaybackActivity : FragmentActivity(R.layout.activity_playback) {
         const val EXTRA_MEDIA_TYPE = "media_type"
     }
 
+    /**
+     * As teclas de salto precisam chegar ao fragment ANTES do Leanback: com o overlay fechado, ele
+     * engole esquerda/direita para abrir os controles, e o filme nunca avança.
+     */
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        val fragment = supportFragmentManager.findFragmentById(R.id.playback_fragment_container)
+        if (fragment is PlaybackVideoFragment && fragment.onKey(event.keyCode, event)) return true
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (savedInstanceState == null) {

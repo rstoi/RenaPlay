@@ -29,7 +29,9 @@ import androidx.media3.ui.leanback.LeanbackPlayerAdapter
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.baita.renaplay.R
-import com.baita.renaplay.data.ConversionSettingsStore
+import com.baita.renaplay.conversion.ConversionJob
+import com.baita.renaplay.conversion.ConversionManager
+import com.baita.renaplay.conversion.ConversionPhase
 import com.baita.renaplay.data.ServerConfig
 import com.baita.renaplay.data.ServerConfigStore
 import com.baita.renaplay.data.SucaAuthStore
@@ -38,7 +40,7 @@ import com.baita.renaplay.smb.SmbClientProvider
 import com.baita.renaplay.smb.SmbResult
 import com.baita.renaplay.suca.SucaApiClient
 import com.baita.renaplay.subtitles.SubtitleSearchActivity
-import com.baita.renaplay.subtitles.subtitleMatchScore
+import com.baita.renaplay.subtitles.SubtitleMatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -48,6 +50,9 @@ import java.util.Locale
 private val SUBTITLE_EXTENSIONS = setOf("srt", "vtt", "ass", "ssa", "sub")
 
 private enum class TrackPickerType { SUBTITLE, AUDIO }
+
+private const val SALTO_MS = 10_000L
+private const val SALTO_LONGO_MS = 60_000L
 
 class PlaybackVideoFragment : VideoSupportFragment() {
 
@@ -59,9 +64,12 @@ class PlaybackVideoFragment : VideoSupportFragment() {
     private var tmdbId: Int? = null
     private var mediaType: String? = null
     private var progressHandler: Handler? = null
+    private var conversionDialog: android.app.AlertDialog? = null
+    private var undecodableDialog: android.app.AlertDialog? = null
     private var hasAppliedResume = false
     private var hasSentPlayEvent = false
     private var hasWarnedUndecodableVideo = false
+    private var jaLogouLegenda = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -96,20 +104,26 @@ class PlaybackVideoFragment : VideoSupportFragment() {
                 DefaultMediaSourceFactory(requireContext())
                     .setDataSourceFactory(CompositeDataSourceFactory(requireContext(), config))
             )
-            // Buffers maiores que o padrão do ExoPlayer: streaming via SMB tem latência mais
-            // variável que HTTP/CDN, então um buffer grande absorve esses picos sem re-bufferizar
-            // no meio do vídeo. Mesma ideia do cache de read-ahead do Kodi (advancedsettings
-            // memorysize/readfactor): com o pipeline paralelo de [SmbDataSource] o throughput medido
-            // (~1,8 MB/s) é várias vezes o bitrate típico dos arquivos, então dá pra encher um
-            // buffer grande rápido e ficar com folga.
+            // Buffer generoso em TEMPO, mas com teto em BYTES — e o teto é o que manda.
+            //
+            // Antes eram 300s de vídeo sem limite de tamanho: num filme de 5 Mbps isso são ~190MB
+            // de buffer, e este Fire TV tem 922MB de RAM no total. O resultado não era rebuffer nem
+            // travada: era o sistema MATANDO o app em primeiro plano, no meio do filme
+            // (am_low_memory seguido de am_proc_died com adj=0). O vídeo simplesmente sumia e voltava
+            // para a grade.
+            //
+            // 24MB absorvem ~40s de um filme de 5 Mbps — folga de sobra para os picos de latência do
+            // SMB, que é o que o buffer grande existia para cobrir, sem torrar a memória do aparelho.
             .setLoadControl(
                 DefaultLoadControl.Builder()
                     .setBufferDurationsMs(
-                        60_000, // mín. antes de arriscar rebuffer
-                        300_000, // máx. mantido em buffer
+                        20_000, // mín. antes de arriscar rebuffer
+                        60_000, // máx. mantido em buffer (o teto em bytes corta antes, num filme pesado)
                         1_500, // mín. pra iniciar playback (não atrasa o primeiro frame)
                         5_000 // mín. pra retomar após rebuffer
                     )
+                    .setTargetBufferBytes(24 * 1024 * 1024)
+                    .setPrioritizeTimeOverSizeThresholds(false)
                     .build()
             )
             .build()
@@ -123,6 +137,10 @@ class PlaybackVideoFragment : VideoSupportFragment() {
             }
 
             override fun onCues(cueGroup: CueGroup) {
+                if (cueGroup.cues.isNotEmpty() && !jaLogouLegenda) {
+                    jaLogouLegenda = true
+                    android.util.Log.i("RenaPlaySub", "legenda aparecendo na tela: ${cueGroup.cues.first().text}")
+                }
                 subtitleView.setCues(cueGroup.cues)
             }
 
@@ -131,7 +149,7 @@ class PlaybackVideoFragment : VideoSupportFragment() {
                     hasAppliedResume = true
                     val resumeMs = WatchProgressStore.lastPosition(requireContext(), videoPath)
                     if (resumeMs > 5_000L && resumeMs < exoPlayer.duration - 5_000L) {
-                        exoPlayer.seekTo(resumeMs)
+                        perguntarRetomada(exoPlayer, resumeMs)
                     }
                 }
             }
@@ -169,6 +187,12 @@ class PlaybackVideoFragment : VideoSupportFragment() {
             onAudioClicked = { showTrackPicker(TrackPickerType.AUDIO) }
         )
         glue.title = videoTitle
+        // Sem um seek provider, a barra de progresso do Leanback é enfeite: o D-pad não navega no
+        // tempo, e o único jeito de sair do lugar seria... não existia. Com ele, esquerda/direita
+        // sobre a barra varrem o filme e OK confirma o ponto. (Fora dos controles, esquerda/direita
+        // saltam direto — ver [onKey].)
+        glue.isSeekEnabled = true
+        glue.seekProvider = object : androidx.leanback.widget.PlaybackSeekDataProvider() {}
         glue.host = VideoSupportFragmentGlueHost(this)
         glue.playWhenPrepared()
 
@@ -190,6 +214,21 @@ class PlaybackVideoFragment : VideoSupportFragment() {
         exoPlayer.setMediaItem(MediaItem.Builder().setUri(smbPathToUri(videoPath)).build())
         exoPlayer.prepare()
 
+        // Converter troca o nome do arquivo: "filme.mkv" vira "filme.mp4" (o original fica como
+        // .hevcbak). Um card vindo do cache da biblioteca, ou de "Continuar assistindo", ainda
+        // aponta para o nome antigo — e o vídeo simplesmente não abriria. Aqui, se o caminho pedido
+        // não existe mais e há um convertido no lugar, o player troca sozinho.
+        lifecycleScope.launch { redirecionarParaConvertidoSeSumiu(config) }
+
+        // Reabrir um vídeo cuja conversão ainda está rolando traz a tela de progresso de volta,
+        // em vez de tentar tocar um arquivo que está prestes a ser substituído. A conversão pode
+        // estar rolando no SERVIDOR, sem nada do app envolvido — inclusive de uma sessão anterior,
+        // ou de outro Fire TV — então, sem job local, vale perguntar a ele.
+        observeConversion()
+        if (ConversionManager.jobFor(videoPath) == null) {
+            ConversionManager.acompanharNoServidor(requireContext(), config, videoPath, videoTitle)
+        }
+
         lifecycleScope.launch {
             val subtitleConfig = resolveSubtitleConfig(config, videoPath, subtitleLocalPath, subtitleSmbPath)
                 ?: return@launch
@@ -205,6 +244,84 @@ class PlaybackVideoFragment : VideoSupportFragment() {
             )
             exoPlayer.prepare()
         }
+    }
+
+    /**
+     * O arquivo pedido sumiu do compartilhamento e existe o convertido no lugar? Toca o convertido.
+     */
+    private suspend fun redirecionarParaConvertidoSeSumiu(config: ServerConfig) {
+        if (videoPath.endsWith(".mp4", ignoreCase = true)) return
+        val convertido = "${videoPath.substringBeforeLast('.')}.mp4"
+        val trocou = withContext(Dispatchers.IO) {
+            val smb = SmbClientProvider.instance
+            val original = runCatching {
+                smb.exists(config.ip, config.share, videoPath, config.user, config.password, config.domain)
+            }.getOrDefault(true)
+            if (original) return@withContext false
+            runCatching {
+                smb.exists(config.ip, config.share, convertido, config.user, config.password, config.domain)
+            }.getOrDefault(false)
+        }
+        if (!trocou) return
+
+        val exo = player ?: return
+        videoPath = convertido
+        exo.setMediaItem(MediaItem.Builder().setUri(smbPathToUri(convertido)).build())
+        exo.prepare()
+    }
+
+    /**
+     * Retomar de onde parou é o que quase sempre se quer — mas nem sempre. Antes, o player pulava
+     * sozinho para o meio do filme e não havia como recomeçar do início sem procurar a barra e
+     * arrastar até o zero (o que também não funcionava, porque não havia como arrastar).
+     */
+    private fun perguntarRetomada(exoPlayer: ExoPlayer, resumeMs: Long) {
+        val minutos = resumeMs / 60_000
+        val segundos = (resumeMs % 60_000) / 1000
+        val quando = String.format(java.util.Locale("pt", "BR"), "%d:%02d", minutos, segundos)
+        exoPlayer.pause()
+        android.app.AlertDialog.Builder(requireContext())
+            .setTitle(getString(R.string.resume_title))
+            .setMessage(getString(R.string.resume_message, quando))
+            .setPositiveButton(getString(R.string.resume_continue)) { _, _ ->
+                exoPlayer.seekTo(resumeMs)
+                exoPlayer.play()
+            }
+            .setNegativeButton(getString(R.string.resume_restart)) { _, _ ->
+                exoPlayer.seekTo(0)
+                exoPlayer.play()
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    /**
+     * Avanço e retrocesso pelo controle. O glue do Leanback só dá seek pela barra de progresso, e a
+     * barra só aparece com o overlay aberto — sem isto, o controle remoto simplesmente não avançava
+     * o filme. Com o overlay fechado, esquerda/direita saltam; segurar acelera o salto.
+     */
+    fun onKey(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        val exoPlayer = player ?: return false
+        if (event.action != android.view.KeyEvent.ACTION_DOWN) return false
+        android.util.Log.i("RenaPlayKeys", "tecla=$keyCode overlay=$isControlsOverlayVisible pos=${exoPlayer.currentPosition}")
+        val salto = if (event.repeatCount > 2) SALTO_LONGO_MS else SALTO_MS
+        return when (keyCode) {
+            android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { saltar(exoPlayer, salto); true }
+            android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> { saltar(exoPlayer, -salto); true }
+            android.view.KeyEvent.KEYCODE_DPAD_RIGHT ->
+                if (!isControlsOverlayVisible) { saltar(exoPlayer, salto); true } else false
+            android.view.KeyEvent.KEYCODE_DPAD_LEFT ->
+                if (!isControlsOverlayVisible) { saltar(exoPlayer, -salto); true } else false
+            else -> false
+        }
+    }
+
+    private fun saltar(exoPlayer: ExoPlayer, deltaMs: Long) {
+        val alvo = (exoPlayer.currentPosition + deltaMs)
+            .coerceIn(0L, (exoPlayer.duration - 1000L).coerceAtLeast(0L))
+        android.util.Log.i("RenaPlayKeys", "saltando de ${exoPlayer.currentPosition} para $alvo (dur=${exoPlayer.duration})")
+        exoPlayer.seekTo(alvo)
+        if (!exoPlayer.isPlaying) exoPlayer.play()
     }
 
     private suspend fun resolveSubtitleConfig(
@@ -237,9 +354,14 @@ class PlaybackVideoFragment : VideoSupportFragment() {
                     .filter {
                         !it.isDirectory && SUBTITLE_EXTENSIONS.contains(it.name.substringAfterLast('.', "").lowercase())
                     }
-                    .maxByOrNull { subtitleMatchScore(videoName, it.name) }
-                    ?.takeIf { subtitleMatchScore(videoName, it.name) > 0 }
+                    // Só entra automaticamente a legenda que o [SubtitleMatcher] aceita: título,
+                    // ano e episódio têm de bater. Uma legenda que ele recusa é de outro filme —
+                    // e legenda errada é pior do que legenda nenhuma.
+                    .mapNotNull { entry -> SubtitleMatcher.pontuar(videoName, entry.name)?.let { entry to it } }
+                    .maxByOrNull { it.second }
+                    ?.first
                 match?.let { entry ->
+                    android.util.Log.i("RenaPlaySub", "legenda automática: ${entry.name}")
                     readSmbBytes(config, entry.path)?.let { bytes -> buildSubtitleConfigFromBytes(bytes, entry.path) }
                 }
             } else {
@@ -425,105 +547,106 @@ class PlaybackVideoFragment : VideoSupportFragment() {
      * Diálogo: avisa que este Fire TV não decodifica o codec e oferece converter+substituir.
      */
     private fun promptConvertReplace(codec: String) {
-        android.app.AlertDialog.Builder(requireContext())
+        // Este arquivo já está sendo convertido (por este aparelho, por outro, ou por uma sessão
+        // anterior): oferecer "converter e substituir" seria pedir para recodificar o mesmo filme
+        // duas vezes. Quem manda na tela, aqui, é o progresso da conversão que já existe.
+        if (ConversionManager.isRunning(videoPath)) return
+        undecodableDialog = android.app.AlertDialog.Builder(requireContext())
             .setTitle(getString(R.string.convert_dialog_title))
             .setMessage(getString(R.string.convert_dialog_message, codec))
-            .setPositiveButton(getString(R.string.convert_dialog_confirm)) { _, _ -> runConversion() }
+            .setPositiveButton(getString(R.string.convert_dialog_confirm)) { _, _ -> startConversion() }
             .setNegativeButton(getString(R.string.convert_dialog_cancel), null)
             .show()
     }
 
+    private fun startConversion() {
+        val config = ServerConfigStore.load(requireContext()) ?: return
+        ConversionManager.start(requireContext(), config, videoPath, videoTitle)
+    }
+
     /**
-     * Converte o vídeo usando o serviço HEVC264 da rede local e substitui o arquivo no share.
-     * Fluxo: descobre o serviço (UDP broadcast) → lê o original do SMB e faz upload → acompanha
-     * o progresso (SSE) → baixa o H.264 e grava de volta no share (<base>.mp4), guardando o
-     * original como <arquivo>.hevcbak. Ao concluir, reabre o player no novo arquivo.
+     * Espelha na tela o job de conversão deste vídeo, se existir. É o mesmo caminho para os dois
+     * casos: acabei de disparar a conversão, ou reabri um vídeo cuja conversão já estava rolando
+     * (o StateFlow entrega o estado corrente assim que a coleta começa, então a tela de progresso
+     * reaparece sozinha). Quem executa é o [ConversionManager], que vive fora desta tela.
      */
-    private fun runConversion() {
-        val context = requireContext()
-        val config = ServerConfigStore.load(context) ?: return
-        val smb = SmbClientProvider.instance
-        val path = videoPath
-        player?.pause() // sem decoder de vídeo, só haveria áudio sobre tela preta
-
-        val progressDialog = android.app.AlertDialog.Builder(context)
-            .setTitle(getString(R.string.convert_progress_title))
-            .setMessage(getString(R.string.convert_progress_starting))
-            .setCancelable(false)
-            .create()
-        progressDialog.show()
-
-        fun setMsg(msg: String) = requireActivity().runOnUiThread { progressDialog.setMessage(msg) }
-
+    private fun observeConversion() {
+        // lifecycleScope, e não viewLifecycleOwner: isto é chamado de onCreate, quando a View
+        // ainda não existe — viewLifecycleOwner estoura ali (IllegalStateException).
         lifecycleScope.launch {
-            try {
-                withContext(Dispatchers.IO) {
-                    val baseUrl = Hevc264Discovery.discover()
-                        ?: ConversionSettingsStore.getServiceUrl(context)
-                    val client = Hevc264Client(baseUrl)
-                    if (!client.health()) {
-                        throw java.io.IOException(getString(R.string.convert_error_no_service))
-                    }
-
-                    // upload do original (streaming direto do SMB)
-                    setMsg(getString(R.string.convert_progress_uploading))
-                    val filename = path.substringAfterLast('/')
-                    val length = smb.fileLength(
-                        config.ip, config.share, path, config.user, config.password, config.domain)
-                    val id = client.upload(filename, length) {
-                        smb.openInputStream(
-                            config.ip, config.share, path, config.user, config.password, config.domain)
-                    }
-
-                    // progresso da conversão no servidor
-                    client.streamProgress(id) { p ->
-                        if (p.error != null) throw java.io.IOException(p.error)
-                        setMsg(getString(R.string.convert_progress_running, p.progress))
-                    }
-
-                    // baixa e grava de volta no share, com swap + backup
-                    setMsg(getString(R.string.convert_progress_saving))
-                    val stem = path.substringBeforeLast('.')
-                    val tmpPath = "$stem.mp4.tmp"
-                    val finalPath = "$stem.mp4"
-                    val backupPath = "$path.hevcbak"
-                    client.download(id) { input ->
-                        smb.openOutputStream(
-                            config.ip, config.share, tmpPath,
-                            config.user, config.password, config.domain).use { out ->
-                            input.copyTo(out, 1 shl 20)
-                        }
-                    }
-                    // remove restos de conversões anteriores (renameTo do jcifs falha se o
-                    // destino já existir) antes de mover original→backup e tmp→final
-                    smb.delete(config.ip, config.share, backupPath,
-                        config.user, config.password, config.domain)
-                    (smb.renameTo(config.ip, config.share, path, backupPath,
-                        config.user, config.password, config.domain) as? SmbResult.Failure)
-                        ?.let { throw java.io.IOException(it.message) }
-                    smb.delete(config.ip, config.share, finalPath,
-                        config.user, config.password, config.domain)
-                    (smb.renameTo(config.ip, config.share, tmpPath, finalPath,
-                        config.user, config.password, config.domain) as? SmbResult.Failure)
-                        ?.let { throw java.io.IOException(it.message) }
-                }
-                progressDialog.dismiss()
-                onConversionDone()
-            } catch (e: Exception) {
-                progressDialog.dismiss()
-                Toast.makeText(
-                    context,
-                    getString(R.string.convert_error, e.message ?: "falha"),
-                    Toast.LENGTH_LONG
-                ).show()
+            ConversionManager.jobs.collect { all ->
+                val job = all[videoPath] ?: return@collect
+                renderConversion(job)
             }
         }
     }
 
-    private fun onConversionDone() {
-        val context = requireContext()
-        Toast.makeText(context, getString(R.string.convert_done), Toast.LENGTH_LONG).show()
-        val newPath = videoPath.substringBeforeLast('.') + ".mp4"
+    private fun renderConversion(job: ConversionJob) {
+        val context = context ?: return
+        // A busca por uma conversão em andamento na rede leva alguns segundos (broadcast + consulta
+        // a cada serviço), e nesse meio-tempo o player já descobriu que não decodifica o vídeo e
+        // abriu o diálogo. Quando a conversão aparece, ele não faz mais sentido.
+        if (job.isRunning) {
+            undecodableDialog?.dismiss()
+            undecodableDialog = null
+        }
+        when (job.phase) {
+            ConversionPhase.DONE -> {
+                dismissConversionDialog()
+                ConversionManager.clear(job.path)
+                Toast.makeText(context, getString(R.string.convert_done), Toast.LENGTH_LONG).show()
+                job.newPath?.let { openConverted(it) }
+            }
+            ConversionPhase.FAILED -> {
+                dismissConversionDialog()
+                ConversionManager.clear(job.path)
+                Toast.makeText(
+                    context,
+                    getString(R.string.convert_error, job.error ?: "falha"),
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            else -> {
+                // Sem decoder de vídeo, deixar o player rodando só daria áudio sobre tela preta.
+                player?.pause()
+                showConversionDialog().setMessage(phaseMessage(job))
+            }
+        }
+    }
+
+    private fun phaseMessage(job: ConversionJob): String = when (job.phase) {
+        ConversionPhase.DISCOVERING -> getString(R.string.convert_progress_starting)
+        ConversionPhase.UPLOADING -> getString(R.string.convert_progress_uploading_pct, job.percent)
+        ConversionPhase.PROCESSING -> getString(R.string.convert_progress_processing)
+        ConversionPhase.CONVERTING -> getString(R.string.convert_progress_running, job.percent)
+        ConversionPhase.DOWNLOADING -> getString(R.string.convert_progress_downloading_pct, job.percent)
+        else -> getString(R.string.convert_progress_saving)
+    }
+
+    private fun showConversionDialog(): android.app.AlertDialog {
+        conversionDialog?.let { return it }
+        // Cancelável: sair da tela NÃO cancela a conversão — ela continua no ConversionManager, e
+        // reabrir o vídeo traz o progresso de volta.
+        val dialog = android.app.AlertDialog.Builder(requireContext())
+            .setTitle(getString(R.string.convert_progress_title))
+            .setMessage(getString(R.string.convert_progress_starting))
+            .setNegativeButton(getString(R.string.convert_progress_background)) { _, _ ->
+                dismissConversionDialog()
+                requireActivity().finish()
+            }
+            .create()
+        dialog.show()
+        conversionDialog = dialog
+        return dialog
+    }
+
+    private fun dismissConversionDialog() {
+        conversionDialog?.dismiss()
+        conversionDialog = null
+    }
+
+    private fun openConverted(newPath: String) {
+        val context = context ?: return
         val intent = Intent(context, PlaybackActivity::class.java).apply {
             putExtra(PlaybackActivity.EXTRA_TITLE, videoTitle)
             putExtra(PlaybackActivity.EXTRA_PATH, newPath)
@@ -533,6 +656,7 @@ class PlaybackVideoFragment : VideoSupportFragment() {
         startActivity(intent)
         requireActivity().finish()
     }
+
 
     private fun openSubtitleSearch() {
         val intent = Intent(requireContext(), SubtitleSearchActivity::class.java).apply {
