@@ -187,6 +187,12 @@ class PlaybackVideoFragment : VideoSupportFragment() {
             onAudioClicked = { showTrackPicker(TrackPickerType.AUDIO) }
         )
         glue.title = videoTitle
+        // Sem um seek provider, a barra de progresso do Leanback é enfeite: o D-pad não navega no
+        // tempo, e o único jeito de sair do lugar seria... não existia. Com ele, esquerda/direita
+        // sobre a barra varrem o filme e OK confirma o ponto. (Fora dos controles, esquerda/direita
+        // saltam direto — ver [onKey].)
+        glue.isSeekEnabled = true
+        glue.seekProvider = object : androidx.leanback.widget.PlaybackSeekDataProvider() {}
         glue.host = VideoSupportFragmentGlueHost(this)
         glue.playWhenPrepared()
 

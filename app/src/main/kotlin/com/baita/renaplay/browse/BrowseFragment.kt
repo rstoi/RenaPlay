@@ -263,22 +263,39 @@ class BrowseFragment : BrowseSupportFragment() {
         val inProgress = WatchProgressStore.listInProgress(requireContext())
         if (inProgress.isEmpty()) return
 
-        val items = inProgress.map { ip ->
+        // O progresso guarda o caminho e o título de QUANDO foi assistido — e os dois envelhecem:
+        // converter renomeia "filme.mkv" para "filme.mp4", e o título pode ter sido limpo desde
+        // então. Sem casar com a biblioteca atual, esta linha exibia o nome sujo antigo e o card
+        // abria um arquivo que não existe mais (o player ficava eternamente em "--/--").
+        val items = inProgress.mapNotNull { ip ->
+            val atual = localItems.firstOrNull { it.path == ip.path }
+                ?: localItems.firstOrNull { mesmaObra(it.path, ip.path) }
+                ?: return@mapNotNull null  // sumiu do compartilhamento: não oferece o que não existe
             MediaItem(
-                id = "$CONTINUE_WATCHING_ID_PREFIX${ip.path}",
-                title = ip.title,
+                id = "$CONTINUE_WATCHING_ID_PREFIX${atual.path}",
+                title = atual.title,
                 kind = if (ip.mediaType == "tv") MediaKind.SERIES else MediaKind.MOVIE,
-                path = ip.path,
+                path = atual.path,
                 isDirectory = false,
                 category = MediaCategory.FILME,
-                tmdbId = ip.tmdbId
+                tmdbId = atual.tmdbId ?: ip.tmdbId,
+                remotePosterUrl = atual.remotePosterUrl
             )
         }
+            // Converter deixa DUAS entradas de progresso para o mesmo filme (o .mkv de antes e o
+            // .mp4 de agora), e as duas apontam para o mesmo arquivo depois de casadas com a
+            // biblioteca — o card aparecia repetido na linha.
+            .distinctBy { it.path }
+        if (items.isEmpty()) return
         val continueAdapter = ArrayObjectAdapter(CardPresenter())
         continueAdapter.addAll(0, items)
         itemAdapters += continueAdapter
         rowsAdapter.add(ListRow(HeaderItem(getString(R.string.row_continue_watching)), continueAdapter))
     }
+
+    /** Mesmo arquivo depois da conversão: só muda a extensão ("filme.mkv" -> "filme.mp4"). */
+    private fun mesmaObra(a: String, b: String): Boolean =
+        a.substringBeforeLast('.') == b.substringBeforeLast('.')
 
     private fun resumePlayback(item: MediaItem) {
         val intent = Intent(requireContext(), PlaybackActivity::class.java).apply {

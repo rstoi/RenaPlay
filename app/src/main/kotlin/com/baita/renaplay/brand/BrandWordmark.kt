@@ -23,11 +23,10 @@ object BrandWordmark {
     private val GRADIENT_POSITIONS = floatArrayOf(0f, 0.55f, 1f)
 
     fun createBitmap(context: Context, textSizePx: Float): Bitmap {
-        val typeface = Typefaces.display(context)
+        val typeface = Typefaces.logo(context)
         val sucaPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG or Paint.LINEAR_TEXT_FLAG).apply {
             this.typeface = typeface
             textSize = textSizePx
-            textSkewX = -0.22f // synthetic italic, since Fraunces' italic axis isn't selected here
         }
 
         val sucaWidth = sucaPaint.measureText("Suca")
