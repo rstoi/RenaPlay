@@ -93,6 +93,9 @@
     <string name="settings_key_invalid">Digite uma chave de API.</string>
     <string name="settings_key_ok">Chave válida!</string>
     <string name="settings_key_fail">Chave inválida ou sem acesso.</string>
+    <string name="settings_convert_mode">Onde converter os vídeos</string>
+    <string name="settings_convert_mode_server">No servidor: ele lê e grava no compartilhamento sozinho (recomendado)</string>
+    <string name="settings_convert_mode_device">Neste aparelho: envia o vídeo ao conversor e traz o resultado de volta</string>
     <string name="settings_suca_pairing">Parear com Suca Media</string>
     <string name="settings_suca_connected">Suca Media: conectado (%1$s)</string>
     <string name="settings_suca_not_connected">Suca Media: não conectado</string>

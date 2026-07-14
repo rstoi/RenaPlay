@@ -40,7 +40,7 @@ import com.baita.renaplay.smb.SmbClientProvider
 import com.baita.renaplay.smb.SmbResult
 import com.baita.renaplay.suca.SucaApiClient
 import com.baita.renaplay.subtitles.SubtitleSearchActivity
-import com.baita.renaplay.subtitles.subtitleMatchScore
+import com.baita.renaplay.subtitles.SubtitleMatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -62,6 +62,7 @@ class PlaybackVideoFragment : VideoSupportFragment() {
     private var mediaType: String? = null
     private var progressHandler: Handler? = null
     private var conversionDialog: android.app.AlertDialog? = null
+    private var undecodableDialog: android.app.AlertDialog? = null
     private var hasAppliedResume = false
     private var hasSentPlayEvent = false
     private var hasWarnedUndecodableVideo = false
@@ -193,9 +194,20 @@ class PlaybackVideoFragment : VideoSupportFragment() {
         exoPlayer.setMediaItem(MediaItem.Builder().setUri(smbPathToUri(videoPath)).build())
         exoPlayer.prepare()
 
+        // Converter troca o nome do arquivo: "filme.mkv" vira "filme.mp4" (o original fica como
+        // .hevcbak). Um card vindo do cache da biblioteca, ou de "Continuar assistindo", ainda
+        // aponta para o nome antigo — e o vídeo simplesmente não abriria. Aqui, se o caminho pedido
+        // não existe mais e há um convertido no lugar, o player troca sozinho.
+        lifecycleScope.launch { redirecionarParaConvertidoSeSumiu(config) }
+
         // Reabrir um vídeo cuja conversão ainda está rolando traz a tela de progresso de volta,
-        // em vez de tentar tocar um arquivo que está prestes a ser substituído.
+        // em vez de tentar tocar um arquivo que está prestes a ser substituído. A conversão pode
+        // estar rolando no SERVIDOR, sem nada do app envolvido — inclusive de uma sessão anterior,
+        // ou de outro Fire TV — então, sem job local, vale perguntar a ele.
         observeConversion()
+        if (ConversionManager.jobFor(videoPath) == null) {
+            ConversionManager.acompanharNoServidor(requireContext(), config, videoPath, videoTitle)
+        }
 
         lifecycleScope.launch {
             val subtitleConfig = resolveSubtitleConfig(config, videoPath, subtitleLocalPath, subtitleSmbPath)
@@ -212,6 +224,30 @@ class PlaybackVideoFragment : VideoSupportFragment() {
             )
             exoPlayer.prepare()
         }
+    }
+
+    /**
+     * O arquivo pedido sumiu do compartilhamento e existe o convertido no lugar? Toca o convertido.
+     */
+    private suspend fun redirecionarParaConvertidoSeSumiu(config: ServerConfig) {
+        if (videoPath.endsWith(".mp4", ignoreCase = true)) return
+        val convertido = "${videoPath.substringBeforeLast('.')}.mp4"
+        val trocou = withContext(Dispatchers.IO) {
+            val smb = SmbClientProvider.instance
+            val original = runCatching {
+                smb.exists(config.ip, config.share, videoPath, config.user, config.password, config.domain)
+            }.getOrDefault(true)
+            if (original) return@withContext false
+            runCatching {
+                smb.exists(config.ip, config.share, convertido, config.user, config.password, config.domain)
+            }.getOrDefault(false)
+        }
+        if (!trocou) return
+
+        val exo = player ?: return
+        videoPath = convertido
+        exo.setMediaItem(MediaItem.Builder().setUri(smbPathToUri(convertido)).build())
+        exo.prepare()
     }
 
     private suspend fun resolveSubtitleConfig(
@@ -244,8 +280,12 @@ class PlaybackVideoFragment : VideoSupportFragment() {
                     .filter {
                         !it.isDirectory && SUBTITLE_EXTENSIONS.contains(it.name.substringAfterLast('.', "").lowercase())
                     }
-                    .maxByOrNull { subtitleMatchScore(videoName, it.name) }
-                    ?.takeIf { subtitleMatchScore(videoName, it.name) > 0 }
+                    // Só entra automaticamente a legenda que o [SubtitleMatcher] aceita: título,
+                    // ano e episódio têm de bater. Uma legenda que ele recusa é de outro filme —
+                    // e legenda errada é pior do que legenda nenhuma.
+                    .mapNotNull { entry -> SubtitleMatcher.pontuar(videoName, entry.name)?.let { entry to it } }
+                    .maxByOrNull { it.second }
+                    ?.first
                 match?.let { entry ->
                     readSmbBytes(config, entry.path)?.let { bytes -> buildSubtitleConfigFromBytes(bytes, entry.path) }
                 }
@@ -432,7 +472,11 @@ class PlaybackVideoFragment : VideoSupportFragment() {
      * Diálogo: avisa que este Fire TV não decodifica o codec e oferece converter+substituir.
      */
     private fun promptConvertReplace(codec: String) {
-        android.app.AlertDialog.Builder(requireContext())
+        // Este arquivo já está sendo convertido (por este aparelho, por outro, ou por uma sessão
+        // anterior): oferecer "converter e substituir" seria pedir para recodificar o mesmo filme
+        // duas vezes. Quem manda na tela, aqui, é o progresso da conversão que já existe.
+        if (ConversionManager.isRunning(videoPath)) return
+        undecodableDialog = android.app.AlertDialog.Builder(requireContext())
             .setTitle(getString(R.string.convert_dialog_title))
             .setMessage(getString(R.string.convert_dialog_message, codec))
             .setPositiveButton(getString(R.string.convert_dialog_confirm)) { _, _ -> startConversion() }
@@ -464,6 +508,13 @@ class PlaybackVideoFragment : VideoSupportFragment() {
 
     private fun renderConversion(job: ConversionJob) {
         val context = context ?: return
+        // A busca por uma conversão em andamento na rede leva alguns segundos (broadcast + consulta
+        // a cada serviço), e nesse meio-tempo o player já descobriu que não decodifica o vídeo e
+        // abriu o diálogo. Quando a conversão aparece, ele não faz mais sentido.
+        if (job.isRunning) {
+            undecodableDialog?.dismiss()
+            undecodableDialog = null
+        }
         when (job.phase) {
             ConversionPhase.DONE -> {
                 dismissConversionDialog()

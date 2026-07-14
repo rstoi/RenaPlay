@@ -70,11 +70,21 @@ class BrowseFragment : BrowseSupportFragment() {
 
     override fun onResume() {
         super.onResume()
-        // Refaz o bind das linhas (sem rescanear o SMB) para que a barra de progresso
-        // de "assistido" reflita o que acabou de ser visto ao voltar do player.
+        // Refaz o bind das linhas para que a barra de progresso de "assistido" reflita o que acabou
+        // de ser visto ao voltar do player.
         itemAdapters.forEach { it.notifyArrayItemRangeChanged(0, it.size()) }
         statusHandler.post(statusUpdater)
+
+        // E revarre o compartilhamento: um arquivo novo copiado para o SMB, ou um filme que acabou
+        // de ser convertido (o .mkv vira .mp4), só apareceria na próxima abertura do app. Como a
+        // varredura roda em segundo plano e a grade já está montada a partir do cache, isto não
+        // custa espera nenhuma para quem está olhando.
+        if (!primeiraCarga) loadLibrary()
+        primeiraCarga = false
     }
+
+    /** onViewCreated já varre; não faz sentido varrer duas vezes na abertura. */
+    private var primeiraCarga = true
 
     override fun onPause() {
         super.onPause()

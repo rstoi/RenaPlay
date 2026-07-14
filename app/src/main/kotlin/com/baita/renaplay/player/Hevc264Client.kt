@@ -36,6 +36,41 @@ object Hevc264Discovery {
     private const val DISCOVERY_PORT = 8766
     private const val QUERY = "HEVC264?"
 
+    /**
+     * TODOS os serviços que responderem, não só o primeiro. Com mais de um conversor na rede, o
+     * "primeiro que gritar" é sorteio — e uma conversão que já está rolando no outro fica invisível:
+     * o aparelho jura que não há nada em andamento e oferece converter tudo de novo.
+     */
+    fun discoverAll(timeoutMs: Int = 2500): List<String> {
+        val achados = LinkedHashSet<String>()
+        try {
+            DatagramSocket().use { sock ->
+                sock.broadcast = true
+                sock.soTimeout = timeoutMs
+                val data = QUERY.toByteArray()
+                sock.send(DatagramPacket(data, data.size, InetAddress.getByName("255.255.255.255"), DISCOVERY_PORT))
+                val deadline = System.currentTimeMillis() + timeoutMs
+                val buf = ByteArray(256)
+                while (System.currentTimeMillis() < deadline) {
+                    val resp = DatagramPacket(buf, buf.size)
+                    try {
+                        sock.receive(resp)
+                    } catch (e: SocketTimeoutException) {
+                        break
+                    }
+                    val text = String(resp.data, 0, resp.length).trim()
+                    if (text.startsWith("HEVC264|")) {
+                        val port = text.split("|").getOrNull(2)?.trim()?.toIntOrNull() ?: 8765
+                        achados += "http://${resp.address.hostAddress}:$port"
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // rede indisponível: devolve o que já achou
+        }
+        return achados.toList()
+    }
+
     fun discover(timeoutMs: Int = 2500): String? {
         return try {
             DatagramSocket().use { sock ->
@@ -106,6 +141,46 @@ class Hevc264Client(
     private val uploadHttp: OkHttpClient = http.newBuilder()
         .retryOnConnectionFailure(false)
         .build()
+
+    /**
+     * Pede ao serviço que converta um arquivo que já está no compartilhamento — ele lê do SMB,
+     * converte e grava de volta sozinho. O aparelho não carrega um byte do vídeo, e a conversão
+     * não depende mais dele continuar vivo.
+     */
+    fun convertSmb(
+        ip: String, share: String, path: String,
+        user: String?, password: String?, domain: String?
+    ): String {
+        val corpo = JSONObject()
+            .put("ip", ip).put("share", share).put("path", path)
+            .put("user", user.orEmpty()).put("password", password.orEmpty())
+            .put("domain", domain.orEmpty())
+            .toString().toRequestBody("application/json".toMediaTypeOrNull())
+        val req = Request.Builder().url("$base/convert_smb").post(corpo).build()
+        http.newCall(req).execute().use { r ->
+            val text = r.body?.string().orEmpty()
+            if (!r.isSuccessful) {
+                val msg = runCatching { JSONObject(text).optString("error") }.getOrNull()
+                throw IOException(msg?.takeIf { it.isNotBlank() } ?: "convert_smb HTTP ${r.code}")
+            }
+            return JSONObject(text).getString("id")
+        }
+    }
+
+    /** O serviço sabe converter lendo direto do compartilhamento? (versões antigas não sabem) */
+    fun supportsSmbConvert(): Boolean = try {
+        val req = Request.Builder().url("$base/health").get().build()
+        http.newCall(req).execute().use { r ->
+            val feats = JSONObject(r.body?.string().orEmpty()).optJSONArray("features")
+            (0 until (feats?.length() ?: 0)).any { feats!!.getString(it) == "smb" }
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    /** Job ainda em andamento para este arquivo — usado para reencontrar uma conversão do servidor. */
+    fun jobEmAndamento(filename: String): String? =
+        buscaJob(filename) { it.optString("status") in setOf("queued", "running") }
 
     fun health(): Boolean = try {
         val req = Request.Builder().url("$base/health").get().build()
@@ -216,7 +291,7 @@ class Hevc264Client(
         }
 
     /** Consulta /jobs e devolve o id do job MAIS NOVO que casa com [filename] e [aceita]. */
-    private fun buscaJob(filename: String, aceita: (JSONObject) -> Boolean): String? = try {
+    fun buscaJob(filename: String, aceita: (JSONObject) -> Boolean): String? = try {
         val req = Request.Builder().url("$base/jobs").get().build()
         http.newCall(req).execute().use { r ->
             if (!r.isSuccessful) null

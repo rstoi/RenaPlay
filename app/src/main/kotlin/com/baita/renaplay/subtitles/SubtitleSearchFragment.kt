@@ -57,7 +57,11 @@ class SubtitleSearchFragment : GuidedStepSupportFragment() {
 
         lifecycleScope.launch {
             val found = withContext(Dispatchers.IO) {
-                val query = cleanQueryFromTitle(videoTitle)
+                // A consulta sai do NOME DO ARQUIVO, não do título de exibição: é ele que carrega o
+                // ano e o SxxExx. E sai limpa — sem resolução, codec, áudio ou grupo de release,
+                // que só fazem as fontes web devolverem legenda de outra coisa.
+                val query = SubtitleMatcher.consulta(videoPath.substringAfterLast('/'))
+                    .ifBlank { cleanQueryFromTitle(videoTitle) }
                 val http = HttpClientProvider.client
                 val openSubtitles = OpenSubtitlesProvider(http) { SubtitleSettingsStore.getOpenSubtitlesKey(context) }
 
@@ -82,7 +86,11 @@ class SubtitleSearchFragment : GuidedStepSupportFragment() {
                 }
 
                 val videoName = videoPath.substringAfterLast('/')
-                (local + webResults).sortedByDescending { subtitleMatchScore(videoName, it.label) }
+                // Local primeiro, sempre: é o arquivo que está ao lado do vídeo, não depende de rede
+                // e quase sempre é o que o usuário quer. Dentro de cada grupo, o casador decide.
+                val ordena = compareByDescending<SubtitleResult> { it.source == SubtitleSource.LOCAL }
+                    .thenByDescending { SubtitleMatcher.pontuar(videoName, it.label) ?: -1 }
+                (local + webResults).sortedWith(ordena)
             }
 
             results = found

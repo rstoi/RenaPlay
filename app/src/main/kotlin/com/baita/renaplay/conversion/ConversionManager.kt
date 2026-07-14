@@ -72,6 +72,75 @@ object ConversionManager {
     }
 
     /**
+     * Procura, em TODOS os conversores da rede, uma conversão já em andamento para [path].
+     *
+     * Perguntar a um só não basta: com dois conversores no ar, a descoberta devolve o que responder
+     * primeiro, e o aparelho que sortear o serviço errado não vê a conversão que está rolando no
+     * outro — jura que não há nada em andamento e se oferece para converter de novo.
+     */
+    private fun jobEmAndamentoNaRede(app: Context, path: String): Pair<Hevc264Client, String>? {
+        val nome = path.substringAfterLast('/')
+        val urls = LinkedHashSet<String>().apply {
+            ConversionSettingsStore.getExplicitServiceUrl(app)?.let { add(it) }
+            addAll(Hevc264Discovery.discoverAll())
+            ConversionSettingsStore.getServiceUrl(app).takeIf { it.isNotBlank() }?.let { add(it) }
+        }
+        for (url in urls) {
+            val client = Hevc264Client(url)
+            val id = client.jobEmAndamento(nome) ?: continue
+            return client to id
+        }
+        return null
+    }
+
+    /**
+     * Segue o progresso de um job do servidor. Quando a recodificação chega ao fim, o serviço ainda
+     * copia o arquivo para o compartilhamento e faz a troca — daí SAVING em vez de "100%" parado.
+     */
+    private fun seguirProgresso(
+        client: Hevc264Client,
+        id: String,
+        phase: (ConversionPhase, Int) -> Unit
+    ) {
+        client.streamProgress(id) { p ->
+            if (p.error != null) throw IOException(p.error)
+            if (p.progress >= 100) phase(ConversionPhase.SAVING, 100)
+            else phase(ConversionPhase.CONVERTING, p.progress)
+        }
+    }
+
+    /**
+     * Reencontra uma conversão que o SERVIDOR está tocando sozinho para [path] — depois de o app ser
+     * fechado, morto pelo sistema, ou o aparelho desligado. Sem isto, apertar play num filme que
+     * está sendo convertido não mostraria nada: o estado vive no processo, e o processo se foi.
+     */
+    fun acompanharNoServidor(context: Context, config: ServerConfig, path: String, title: String) {
+        if (isRunning(path)) return
+        val app = context.applicationContext
+        scope.launch {
+            try {
+                val (client, id) = jobEmAndamentoNaRede(app, path) ?: return@launch
+                Log.i(TAG, "reencontrada conversão em andamento no servidor: job=$id ($path)")
+
+                var job = ConversionJob(path, title, ConversionPhase.CONVERTING)
+                publish(job)
+                fun phase(p: ConversionPhase, percent: Int = 0) {
+                    job = job.copy(phase = p, percent = percent)
+                    publish(job)
+                }
+                seguirProgresso(client, id, ::phase)
+                job = job.copy(
+                    phase = ConversionPhase.DONE, percent = 100,
+                    newPath = "${path.substringBeforeLast('.')}.mp4")
+                publish(job)
+            } catch (e: Exception) {
+                Log.e(TAG, "falha ao acompanhar conversão do servidor ($path)", e)
+                clear(path)
+            }
+        }
+    }
+
+    /**
      * Dispara a conversão de [path]. Idempotente: chamar de novo enquanto já está rodando não
      * inicia um segundo upload — apenas devolve, e quem observa [jobs] segue vendo o mesmo job.
      */
@@ -94,6 +163,20 @@ object ConversionManager {
                 publish(job)
             }
             try {
+                // Outro aparelho — ou uma sessão anterior deste — pode já ter mandado converter este
+                // arquivo. Recomeçar seria recodificar o mesmo filme duas vezes, competindo pela
+                // mesma CPU e dobrando a espera de todo mundo. Então: acompanha, não duplica.
+                jobEmAndamentoNaRede(app, path)?.let { (client, id) ->
+                    Log.i(TAG, "conversão já em andamento para $path (job=$id) — acompanhando")
+                    phase(ConversionPhase.CONVERTING)
+                    seguirProgresso(client, id, ::phase)
+                    job = job.copy(
+                        phase = ConversionPhase.DONE, percent = 100,
+                        newPath = "${path.substringBeforeLast('.')}.mp4")
+                    publish(job)
+                    return@launch
+                }
+
                 val smb = SmbClientProvider.instance
                 val baseUrl = ConversionSettingsStore.getExplicitServiceUrl(app)
                     ?: Hevc264Discovery.discover()
@@ -102,6 +185,21 @@ object ConversionManager {
                 val client = Hevc264Client(baseUrl)
                 if (baseUrl.isBlank() || !client.health()) {
                     throw IOException(app.getString(com.baita.renaplay.R.string.convert_error_no_service))
+                }
+
+                // MODELO NOVO: o serviço lê do compartilhamento, converte e grava de volta. O
+                // aparelho não transporta o vídeo — só acompanha. Se ele for desligado no meio, a
+                // conversão continua e é reencontrada depois ([acompanharNoServidor]).
+                if (ConversionSettingsStore.isServerSide(app) && client.supportsSmbConvert()) {
+                    val id = client.convertSmb(
+                        config.ip, config.share, path, config.user, config.password, config.domain)
+                    Log.i(TAG, "conversão no servidor, job=$id")
+                    phase(ConversionPhase.CONVERTING)
+                    seguirProgresso(client, id, ::phase)
+                    val finalPath = "${path.substringBeforeLast('.')}.mp4"
+                    job = job.copy(phase = ConversionPhase.DONE, percent = 100, newPath = finalPath)
+                    publish(job)
+                    return@launch
                 }
 
                 phase(ConversionPhase.UPLOADING)

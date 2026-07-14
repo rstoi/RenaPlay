@@ -81,4 +81,12 @@ class TitleCleanerTest {
     fun `searchQuery is a no-op when there is no trailing year`() {
         assertEquals("The Matrix", TitleCleaner.searchQuery("The Matrix"))
     }
+
+    @Test
+    fun `tira AV1, OPUS, Blu-ray com hifen, idioma solto e titulo alternativo`() {
+        assertEquals(
+            "The Arctic Convoy (2023)",
+            TitleCleaner.clean("The.Arctic.Convoy.AKA.Konvoi.2023.NOR.1080p.Blu-ray.AV1.OPUS.5.1-heTOrico.mkv")
+        )
+    }
 }

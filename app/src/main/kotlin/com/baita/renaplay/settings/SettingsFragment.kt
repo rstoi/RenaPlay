@@ -11,6 +11,7 @@ import androidx.lifecycle.lifecycleScope
 import com.baita.renaplay.R
 import com.baita.renaplay.data.ServerConfigStore
 import com.baita.renaplay.data.SubtitleSettingsStore
+import com.baita.renaplay.data.ConversionSettingsStore
 import com.baita.renaplay.data.SucaAuthStore
 import com.baita.renaplay.pairing.PairingActivity
 import com.baita.renaplay.setup.ServerSetupActivity
@@ -27,6 +28,7 @@ private const val ACTION_ID_SOURCE_ADDIC7ED = 4L
 private const val ACTION_ID_SOURCE_OPENSUBTITLES = 5L
 private const val ACTION_ID_SUCA_PAIRING = 6L
 private const val ACTION_ID_CHANGE_SERVER = 7L
+private const val ACTION_ID_CONVERT_MODE = 8L
 
 class SettingsFragment : GuidedStepSupportFragment() {
 
@@ -80,6 +82,17 @@ class SettingsFragment : GuidedStepSupportFragment() {
                 .build()
         )
 
+        val noServidor = ConversionSettingsStore.isServerSide(context)
+        actions.add(
+            GuidedAction.Builder(context)
+                .id(ACTION_ID_CONVERT_MODE)
+                .title(getString(R.string.settings_convert_mode))
+                .description(getString(
+                    if (noServidor) R.string.settings_convert_mode_server
+                    else R.string.settings_convert_mode_device))
+                .build()
+        )
+
         val sucaSession = SucaAuthStore.load(context)
         actions.add(
             GuidedAction.Builder(context)
@@ -120,6 +133,14 @@ class SettingsFragment : GuidedStepSupportFragment() {
                 SubtitleSettingsStore.setSourceEnabled(context, SubtitleSettingsStore.SOURCE_ADDIC7ED, action.isChecked)
             ACTION_ID_SOURCE_OPENSUBTITLES ->
                 SubtitleSettingsStore.setSourceEnabled(context, SubtitleSettingsStore.SOURCE_OPENSUBTITLES, action.isChecked)
+            ACTION_ID_CONVERT_MODE -> {
+                val novo = !ConversionSettingsStore.isServerSide(context)
+                ConversionSettingsStore.setServerSide(context, novo)
+                findActionById(ACTION_ID_CONVERT_MODE)?.description = getString(
+                    if (novo) R.string.settings_convert_mode_server
+                    else R.string.settings_convert_mode_device)
+                notifyActionChanged(findActionPositionById(ACTION_ID_CONVERT_MODE))
+            }
             ACTION_ID_SUCA_PAIRING -> startActivity(Intent(context, PairingActivity::class.java))
             ACTION_ID_CHANGE_SERVER -> {
                 ServerConfigStore.clear(context)

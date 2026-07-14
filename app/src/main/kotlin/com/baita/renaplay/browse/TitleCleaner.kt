@@ -10,18 +10,26 @@ object TitleCleaner {
     private val TAGS = listOf(
         "2160p", "4320p", "1080p", "720p", "480p", "360p", "240p", "4k", "8k",
         "hdr10", "hdr", "sdr", "uhd", "hd", "sd", "10bit", "8bit", "12bit", "hi10p",
-        "bluray", "blu ray", "blueray", "blurip", "re blurip", "rerip", "brrip", "bdrip", "bdremux", "remux",
+        "bluray", "blu ray", "blu-ray", "blueray", "blurip", "re blurip", "rerip", "brrip", "bdrip", "bdremux", "remux",
         "dcprip", "dcp",
         "webrip", "web dl", "web-dl", "webdl", "web", "hdtv", "hdtvrip", "dvdrip", "dvdscr", "dvd",
         "hdcam", "telesync", "cam", "ppv",
-        "x264", "x265", "h264", "h265", "hevc", "avc", "xvid", "divx",
+        "x264", "x265", "h264", "h265", "hevc", "avc", "av1", "vp9", "xvid", "divx",
         "aac", "ac3", "eac3", "ddp5 1", "ddp7 1", "ddp", "dd5 1", "dd7 1", "dd",
-        "dts", "atmos", "truehd", "5 1", "7 1", "2 0",
+        "dts", "atmos", "truehd", "opus", "flac", "5 1", "7 1", "2 0",
         "extended", "unrated", "directors cut", "director s cut", "proper", "repack",
         "internal", "limited", "retail", "dual audio", "dual áudio", "dual", "multi",
         "dublado", "legendado", "nacional",
-        "yify", "yts", "rarbg", "eztv", "ettv"
+        "yify", "yts", "rarbg", "eztv", "ettv",
+        // Idioma/país solto no nome do release: "The.Arctic.Convoy...2023.NOR.1080p..." — some do
+        // título e, sem isso, o TMDB não casa e o filme fica sem pôster.
+        "nor", "swe", "dan", "fin", "ger", "deu", "fre", "fra", "ita", "spa", "esp", "rus", "pol",
+        "jpn", "kor", "chi", "hin", "eng", "vostfr"
     )
+
+    // Título alternativo ("The Arctic Convoy AKA Konvoi"): o que vem depois do AKA é o nome noutro
+    // idioma. Mantê-lo faz a busca no TMDB procurar por uma string que não existe em lugar nenhum.
+    private val TITULO_ALTERNATIVO = Regex("(?i)\\s+aka\\s+.*$")
 
     // Regex(..., IGNORE_CASE) do Kotlin só dobra maiúscula/minúscula no charset ASCII por padrão —
     // "Á" não casava com "á" (ex: "Dual Áudio" sobrevivia à limpeza). Precisa também de
@@ -61,6 +69,7 @@ object TitleCleaner {
 
         val year = YEAR_PATTERN.find(s)?.groupValues?.get(1)
 
+        s = TITULO_ALTERNATIVO.replace(s, " ")
         s = OPEN_YEAR_RANGE.replace(s, " ")
         s = SEASON_RANGE.replace(s, " ")
         s = BRACKET_GROUP.replace(s, " ")
